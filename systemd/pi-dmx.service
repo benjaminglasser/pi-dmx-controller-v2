@@ -17,15 +17,15 @@ Environment=DMX_UART_MIN_SLOTS=256
 # --- OPTION A: HiFiBerry DAC+ ADC (I2S HAT) ---
 # Use left channel only, disable E3/E4/E5 rotation (I2S pin conflict)
 # E1, E2 rotation + E3, E5 buttons still work
-# Environment=AUDIO_INPUT_CHANNEL=left
-# Environment=DISABLE_I2S_ENCODERS=1
-# Environment=AUDIO_DEVICE_NAME=hifiberry
+Environment=AUDIO_INPUT_CHANNEL=left
+Environment=DISABLE_I2S_ENCODERS=1
+Environment=AUDIO_DEVICE_NAME=hifiberry
 
-# --- OPTION B: USB Audio Interface (default) ---
+# --- OPTION B: USB Audio Interface ---
 # All 5 encoders fully functional, uses right channel by default
-Environment=AUDIO_INPUT_CHANNEL=right
-Environment=DISABLE_I2S_ENCODERS=0
-Environment=AUDIO_DEVICE_NAME=USB
+# Environment=AUDIO_INPUT_CHANNEL=right
+# Environment=DISABLE_I2S_ENCODERS=0
+# Environment=AUDIO_DEVICE_NAME=USB
 
 ExecStart=/home/pi/pi-dmx-controller-v2/.venv/bin/python /home/pi/pi-dmx-controller-v2/dmx_audio_react.py
 Restart=on-failure
