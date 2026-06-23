@@ -694,7 +694,7 @@ submenu_editing = False  # Label of selected column is always highlighted
 
 # Submenu column labels for each tab
 SUBMENU_LABELS = {
-    "Modes": ["Pgm", "Cycle", "Beats"],
+    "Modes": ["Program", "Cycle", "Beats"],
     "Settings": ["Gain", "Presets", ""],           # 3rd column blank (Detect mode locked to "old")
     "Setup": ["Output", "Chans", ""],              # Output=Dimmer/DMX, Chans=4-24; col 3 blank (layout)
 }
@@ -1141,7 +1141,7 @@ _last_preset_before_ambient = 1  # Stores the preset to return to when toggling 
 
 # Simple velocity parameters - just max multiplier per parameter type
 # Velocity is calculated as clicks-per-second, then mapped logarithmically
-VELOCITY_MAX_FREQ = 50        # Frequency: large range, high acceleration for fast sweeps
+VELOCITY_MAX_FREQ = 10        # Frequency: ~10x multiplier at max spin speed
 VELOCITY_MAX_Q = 20           # Q factor: 0-99 range
 VELOCITY_MAX_PRESET = 1       # Presets: no acceleration (always 1x)
 VELOCITY_MAX_PAGE = 1         # Pages: no acceleration (always 1x)
@@ -2570,8 +2570,12 @@ def _apply_encoder_delta(enc_idx, direction):
                 t = _home_enc2_range_pct / 99.0
                 band.q = max(q_min, min(Q_MAX, Q_MAX * (q_min / Q_MAX) ** t))
             else:
-                # 1Hz per click: snap to integer Hz then step.
-                band.center = float(max(FFT_MIN_FREQ, min(FFT_MAX_FREQ, int(band.center) + base_delta)))
+                # Base step is proportional to current frequency (~0.1k at 1kHz slow, ~1k at 1kHz fast).
+                # Velocity multiplies on top: slow turns = base_step, fast turns = up to 10x.
+                vel_mult = _calc_velocity_multiplier(1, max_mult=VELOCITY_MAX_FREQ)
+                base_step = max(1, round(band.center / 100))
+                step = max(1, round(base_step * vel_mult))
+                band.center = float(max(FFT_MIN_FREQ, min(FFT_MAX_FREQ, int(band.center) + base_delta * step)))
             return
 
         # ===== Encoder 3 (enc_idx=2): Trigger threshold — 1 display unit per click =====
@@ -2593,8 +2597,7 @@ def _apply_encoder_delta(enc_idx, direction):
                 now = time.time()
                 elapsed_ms = (now - _discrete_last_change[3]) * 1000
                 if elapsed_ms >= DISCRETE_DEBOUNCE_MS:
-                    delta = 1 if direction > 0 else -1
-                    new_idx = max(0, min(len(RELEASE_MODES) - 1, RELEASE_MODE_INDEX + delta))
+                    new_idx = max(0, min(len(RELEASE_MODES) - 1, RELEASE_MODE_INDEX + base_delta))
                     if new_idx != RELEASE_MODE_INDEX:
                         RELEASE_MODE_INDEX = new_idx
                         _discrete_last_change[3] = now
@@ -2789,9 +2792,10 @@ def _calc_velocity_multiplier(enc_idx, max_mult=10, min_mult=1.0):
     
     updates_per_sec = 1.0 / delta_s
     
-    # Exponential smoothing: blend new reading with history
-    alpha = 0.5
-    _enc_update_velocity[enc_idx] = alpha * updates_per_sec + (1 - alpha) * _enc_update_velocity[enc_idx]
+    # Asymmetric smoothing: fast attack, slow decay so sustained fast spinning holds the multiplier high
+    current = _enc_update_velocity[enc_idx]
+    alpha = 0.8 if updates_per_sec > current else 0.15
+    _enc_update_velocity[enc_idx] = alpha * updates_per_sec + (1 - alpha) * current
     
     velocity = _enc_update_velocity[enc_idx]
     
@@ -2800,7 +2804,7 @@ def _calc_velocity_multiplier(enc_idx, max_mult=10, min_mult=1.0):
     # Velocity thresholds tuned for responsive acceleration:
     PRECISION_VELOCITY = 1.0  # updates/sec - below this = min_mult (>1000ms between detents)
     SLOW_VELOCITY = 2.0       # updates/sec - at this point = 1x (500ms between detents)
-    FAST_VELOCITY = 12.0      # updates/sec - above this = max (83ms between detents)
+    FAST_VELOCITY = 7.0       # updates/sec - above this = max (143ms between detents)
     
     if min_mult < 1.0 and velocity <= PRECISION_VELOCITY:
         # Precision mode: very slow turning gets sub-1x multiplier
@@ -3225,7 +3229,7 @@ def encoder_reader():
                         _reset_press_time = 0
                     elif not _btn_save_hold_active:
                         # Debounce elapsed → begin 3s countdown
-                        if time.monotonic() - _btn_save_arm_start >= 0.05:
+                        if time.monotonic() - _btn_save_arm_start >= 0.5:
                             _btn_save_hold_start = time.monotonic()
                             _btn_save_hold_active = True
                     else:
@@ -3262,7 +3266,7 @@ def encoder_reader():
                     elif reset_btn == 0 and _reset_last_state == 0 and _reset_press_time > 0:
                         # Being held
                         if not _reset_countdown_active:
-                            if time.monotonic() - _reset_press_time >= 0.05:
+                            if time.monotonic() - _reset_press_time >= 0.5:
                                 _reset_countdown_start = time.monotonic()
                                 _reset_countdown_active = True
                         else:
@@ -3801,8 +3805,11 @@ def audio_loop():
         # Handle AMBIENT mode separately (non-audio-reactive)
         if active_prog == 6:
             update_ambient_mode(frame_dt_ms)
-        
-        send_dmx(update_lights(frame_dt_ms))
+            # Bypass update_lights: it would decrement env for inactive channels,
+            # corrupting the values update_ambient_mode just wrote to states[i].post.
+            send_dmx([int(255 * states[i].post * BRIGHTNESS) for i in range(DMX_CHANNEL_COUNT)])
+        else:
+            send_dmx(update_lights(frame_dt_ms))
         was_above = above
 
     # Try to open audio stream, falling back to 1 channel if multi-channel fails
