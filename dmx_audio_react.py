@@ -916,8 +916,13 @@ prev_band_energies = np.zeros(len(FFT_BANDS), dtype=np.float32)
 fft_flux = np.zeros(len(FFT_BANDS), dtype=np.float32)
 _fft_low_smooth = np.zeros(len(FFT_BANDS), dtype=np.float32)
 
-# Display-only smoothed bands (EMA + optional spatial); triggers use raw fft_bands
+# Display-only smoothed bands (EMA + optional spatial); triggers use raw fft_bands.
+# fft_display_bands is the clean EMA history; fft_draw_bands is what actually gets
+# drawn (post visual auto-range). Keeping them separate ensures the auto-range
+# stretch never feeds back into the EMA (which would inflate the running peak and
+# collapse the bars to zero).
 fft_display_bands = np.zeros(len(FFT_BANDS), dtype=np.float32)
+fft_draw_bands = np.zeros(len(FFT_BANDS), dtype=np.float32)
 
 # --- Visual auto-range (display only) --------------------------------------
 # The drawn spectrum is stretched so its running [floor, peak] fills the bar
@@ -3562,7 +3567,8 @@ def audio_loop():
                 fft_display_bands[:] = fft_bands
 
         # ---- Visual auto-range (display only): stretch running [floor, peak] to fill height ----
-        # Makes the spectrum shape readable regardless of absolute level. Does not
+        # Reads the clean EMA history (fft_display_bands) and writes the drawn array
+        # (fft_draw_bands) so the stretch never feeds back into the EMA. Does not
         # touch fft_bands, so triggers are unaffected. Disable with FFT_AUTORANGE=0.
         if FFT_AUTORANGE:
             global _fft_ar_peak, _fft_ar_floor
@@ -3578,9 +3584,13 @@ def audio_loop():
             span = _fft_ar_peak - _fft_ar_floor
             if _fft_ar_peak >= FFT_AUTORANGE_SILENCE and span >= FFT_AUTORANGE_MIN_SPAN:
                 # Map [floor, peak] -> [0, TARGET], filling the bar height.
-                fft_display_bands[:] = np.clip(
+                fft_draw_bands[:] = np.clip(
                     (fft_display_bands - _fft_ar_floor) / span * FFT_AUTORANGE_TARGET, 0.0, 1.0)
-            # else: silent / too little dynamic range -> leave bars low (don't amplify noise)
+            else:
+                # Silent / too little dynamic range -> draw raw (low), don't amplify noise.
+                fft_draw_bands[:] = fft_display_bands
+        else:
+            fft_draw_bands[:] = fft_display_bands
 
         # ===== 3-Band Onset Detector ===== (after fft_bands updated this hop)
         global _last_3band_update
@@ -4084,7 +4094,7 @@ class OledUI:
         thresh_y = y + height - int(_effective_thresh * height)
         
         # Use display-smoothed bands (temporal EMA + optional spatial); triggers still use raw fft_bands
-        draw_bands = _smooth_fft_display_bands(fft_display_bands)
+        draw_bands = _smooth_fft_display_bands(fft_draw_bands)
         bar_step = fft_width / num_bands
         any_q_above_thresh = False
 
@@ -4223,7 +4233,7 @@ class OledUI:
         fft_width = width - meter_width - 4  # Use more of the available width
         fft_height = height
         num_bands = len(fft_bands)
-        draw_bands = _smooth_fft_display_bands(fft_display_bands)
+        draw_bands = _smooth_fft_display_bands(fft_draw_bands)
         
         # Calculate bar positions to fill the entire width (no gaps)
         bar_step = fft_width / num_bands
