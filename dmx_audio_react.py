@@ -135,7 +135,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dmx_con
 # hardware-mode ADC with no analog gain), so ~+24 dB absolute is the normal
 # operating point. Anchoring the reference here makes that read as 0 dB in the UI,
 # with the usual ±24 dB of headroom on either side.
-INPUT_GAIN_REF_DB = 24   # 0 dB display = +24 dB absolute (HiFiBerry line-level operating point)
+INPUT_GAIN_REF_DB = 18   # 0 dB display = +18 dB absolute (HiFiBerry line-level operating point)
 INPUT_GAIN_MIN_DB = INPUT_GAIN_REF_DB - 24  # absolute floor (display: -24 dB)
 INPUT_GAIN_MAX_DB = INPUT_GAIN_REF_DB + 24  # absolute ceiling (display: +24 dB)
 INPUT_GAIN_DB = INPUT_GAIN_REF_DB
@@ -821,14 +821,31 @@ def generate_log_bands(num_bands, min_freq, max_freq):
 
 FFT_BANDS = generate_log_bands(FFT_NUM_BANDS, FFT_MIN_FREQ, FFT_MAX_FREQ)
 
-# Frequency compensation curve
+# Frequency compensation curve: a spectral tilt that offsets music's natural
+# low-frequency dominance so the drawn balance matches what you hear. Positive
+# dB/octave boosts highs relative to lows (about a reference frequency).
+#   FFT_TILT_DB_PER_OCT : slope. 0 = raw magnitude (very bass-heavy look);
+#                         3-4 ~ pink-ish/"balanced"; 5 = brighter (old default).
+#   FFT_TILT_REF_HZ     : pivot frequency held at unity gain.
+FFT_TILT_DB_PER_OCT = float(os.environ.get("FFT_TILT_DB_PER_OCT", "4.0"))
+FFT_TILT_REF_HZ = float(os.environ.get("FFT_TILT_REF_HZ", "800.0"))
+# Broad mid-range emphasis (log-gaussian bump) to counter the natural "smile"
+# (strong lows + highs, scooped mids) so the middle — vocals, snare, guitars —
+# reads as tall as the extremes. Set FFT_MID_BOOST_DB=0 to disable.
+FFT_MID_BOOST_DB = float(os.environ.get("FFT_MID_BOOST_DB", "3.0"))     # peak lift at the center
+FFT_MID_HZ = float(os.environ.get("FFT_MID_HZ", "1000.0"))             # center of the bump
+FFT_MID_WIDTH_OCT = float(os.environ.get("FFT_MID_WIDTH_OCT", "1.6"))  # half-width in octaves
 def calculate_freq_compensation():
     compensation = []
     for low, high in FFT_BANDS:
         center = math.sqrt(low * high)
-        ref_freq = 800.0
-        octaves_from_ref = math.log2(center / ref_freq)
-        db_adjustment = octaves_from_ref * 5.0
+        octaves_from_ref = math.log2(center / FFT_TILT_REF_HZ)
+        db_adjustment = octaves_from_ref * FFT_TILT_DB_PER_OCT
+        if FFT_MID_BOOST_DB != 0.0:
+            oct_from_mid = math.log2(center / FFT_MID_HZ)
+            db_adjustment += FFT_MID_BOOST_DB * math.exp(
+                -(oct_from_mid ** 2) / (2.0 * FFT_MID_WIDTH_OCT ** 2)
+            )
         gain = 10 ** (db_adjustment / 20.0)
         gain = max(0.15, min(6.0, gain))
         compensation.append(gain)
@@ -878,8 +895,11 @@ def get_all_band_energies_vectorized(fft_mag):
     band_sums = cumsum[_FFT_BIN_ENDS] - cumsum[_FFT_BIN_STARTS]
     return (band_sums / _FFT_BIN_COUNTS).astype(np.float32)
 
-# Visual gain for FFT display (makes bars appear taller within fixed view)
-FFT_VISUAL_GAIN = 1.0
+# Visual gain for FFT display: uniform multiplier on bar height (display only).
+# Scales every bar up equally so the spectrum is more defined, preserving the
+# relative shape (louder still reads taller); the tallest peaks just clip at the
+# top. Does not change the input or the trigger. Tune live via FFT_VISUAL_GAIN.
+FFT_VISUAL_GAIN = float(os.environ.get("FFT_VISUAL_GAIN", "1.75"))
 
 # FFT state (numpy arrays for faster vectorized operations)
 fft_bands = np.zeros(len(FFT_BANDS), dtype=np.float32)
@@ -938,12 +958,17 @@ fft_draw_bands = np.zeros(len(FFT_BANDS), dtype=np.float32)
 # HiFiBerry input is quiet, so without this the bars sit squashed near the
 # bottom). This affects ONLY fft_display_bands — triggers use raw fft_bands and
 # are untouched. Set FFT_AUTORANGE=0 to disable and fall back to fixed scaling.
-FFT_AUTORANGE = os.environ.get("FFT_AUTORANGE", "1").strip() != "0"
+FFT_AUTORANGE = os.environ.get("FFT_AUTORANGE", "0").strip() != "0"
 FFT_AUTORANGE_TARGET = float(os.environ.get("FFT_AUTORANGE_TARGET", "0.95"))  # running peak -> this height
 FFT_AUTORANGE_PEAK_DECAY = float(os.environ.get("FFT_AUTORANGE_PEAK_DECAY", "0.02"))  # step-down/hop of running peak
 FFT_AUTORANGE_FLOOR_TRACK = float(os.environ.get("FFT_AUTORANGE_FLOOR_TRACK", "0.05"))  # how fast floor follows
 FFT_AUTORANGE_MIN_SPAN = float(os.environ.get("FFT_AUTORANGE_MIN_SPAN", "0.03"))  # don't stretch tiny ranges
 FFT_AUTORANGE_SILENCE = float(os.environ.get("FFT_AUTORANGE_SILENCE", "0.02"))  # below this peak = treat as silent
+# Visual contrast curve (display only): drawn bars are raised to this power.
+# <1 lifts low/mid bands so the spectrum looks fuller and more defined; =1 is
+# linear; >1 makes it spikier (peaks stand out, mids suppressed). Silent bands are
+# already 0 after auto-range, so this never lifts the noise floor. Tunable live.
+FFT_VISUAL_GAMMA = float(os.environ.get("FFT_VISUAL_GAMMA", "1.0"))
 _fft_ar_peak = 0.1   # running spectrum peak (fast attack, slow decay)
 _fft_ar_floor = 0.0  # running spectrum floor (low percentile, slow tracking)
 
@@ -1209,6 +1234,7 @@ AUDIO_DEVICE_NAME = os.environ.get("AUDIO_DEVICE_NAME", "").strip()
 
 AUDIO_DEBUG = os.environ.get("AUDIO_DEBUG", "0").strip() == "1"
 TRIG_DEBUG  = os.environ.get("TRIG_DEBUG",  "0").strip() == "1"
+BTN_DEBUG   = os.environ.get("BTN_DEBUG",   "0").strip() == "1"  # log reset/extra GPIO reads on change
 _audio_dbg_count = 0  # Throttle counter for AUDIO_DEBUG logging
 
 # --- TUI flash message ---
@@ -3243,12 +3269,20 @@ def encoder_reader():
                 _enc_last_sw[4] = enc5_sw
 
                 # ===== Read both direct buttons upfront for combo detection =====
+                global _btn_save_arm_start, _btn_save_hold_start, _btn_save_hold_active
+                global _btn_save_hold_complete, _btn_save_suppressed, _btn_save_needs_release
                 reset_btn = GPIO.input(RESET_BUTTON_GPIO)
                 extra_btn = GPIO.input(EXTRA_BUTTON_GPIO)
 
+                if BTN_DEBUG and (extra_btn != _extra_last_state or reset_btn != _reset_last_state):
+                    print(
+                        f"[BTN] reset={reset_btn} extra={extra_btn} "
+                        f"suppressed={_btn_save_suppressed} needs_release={_btn_save_needs_release} "
+                        f"tab={submenu_tab}({SUBMENU_TABS[submenu_tab]}) col={submenu_column}",
+                        flush=True,
+                    )
+
                 # ===== Reset + Extra held together 3s: save current settings into active preset =====
-                global _btn_save_arm_start, _btn_save_hold_start, _btn_save_hold_active
-                global _btn_save_hold_complete, _btn_save_suppressed, _btn_save_needs_release
                 both_pressed = (reset_btn == 0 and extra_btn == 0)
                 if both_pressed and not _btn_save_needs_release:
                     if _btn_save_arm_start == 0.0:
@@ -3599,6 +3633,10 @@ def audio_loop():
                 fft_draw_bands[:] = fft_display_bands
         else:
             fft_draw_bands[:] = fft_display_bands
+
+        # Visual contrast curve (display only): make active bars fuller/more defined.
+        if FFT_VISUAL_GAMMA != 1.0:
+            np.power(fft_draw_bands, FFT_VISUAL_GAMMA, out=fft_draw_bands)
 
         if AUDIO_DEBUG and _audio_dbg_count % 40 == 0:
             print(
