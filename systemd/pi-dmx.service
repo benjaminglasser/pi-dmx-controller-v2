@@ -20,6 +20,7 @@ Environment=DMX_UART_MIN_SLOTS=256
 Environment=AUDIO_INPUT_CHANNEL=left
 Environment=DISABLE_I2S_ENCODERS=1
 Environment=AUDIO_DEVICE_NAME=hifiberry
+Environment=DETECT_MODE=classic
 
 # --- OPTION B: USB Audio Interface ---
 # All 5 encoders fully functional, uses right channel by default

@@ -573,11 +573,12 @@ BRIGHT_EXCESS_CURVE = 2.15
 # - "kick":      cascaded biquads + faster envelope + decay-only floor + slope-weighted + peak-hold meter
 DETECT_MODES = ["classic", "compander", "kick", "old"]
 
-# Detection mode is locked to "old". The other entries above are kept so
-# the trigger functions and any references to DETECT_MODES still resolve, but
-# the index is fixed and is not loaded from or saved to .dmx_config. The
-# Settings UI no longer exposes a way to switch modes.
-DETECT_MODE_INDEX = DETECT_MODES.index("old")
+# Detection mode: honor the DETECT_MODE env var (classic|compander|kick|old).
+# Previously hard-locked to "old", whose 0.06 FFT-window gate silences low-level
+# line inputs (e.g. HiFiBerry DAC+ADC). Default is "classic" — its lower gate +
+# AGC track quiet signals reliably. Override per-run with DETECT_MODE=<mode>.
+_dm_env = os.environ.get("DETECT_MODE", "classic").strip().lower()
+DETECT_MODE_INDEX = DETECT_MODES.index(_dm_env) if _dm_env in DETECT_MODES else DETECT_MODES.index("classic")
 
 # Beat detection method: 0 = FFT_STANDARD (Q-band analysis)
 # 3-band mode has been removed - now using FFT-only mode
