@@ -92,13 +92,17 @@ The app starts automatically via `pi-dmx.service` after a successful install. To
 
 ```bash
 sudo systemctl stop pi-dmx.service
-sudo .venv/bin/python dmx_audio_react.py
+.venv/bin/python dmx_audio_react.py
 ```
+
+Run as the `pi` user (no `sudo`): the `pi` user is in the `spi`, `i2c`, and `gpio`
+groups, and Adafruit Blinka's `board` module resolves only on the pi user's path, so
+`sudo` breaks the MCP23017/encoder import.
 
 Optional `~/.bashrc` alias:
 
 ```bash
-alias dmx='sudo /home/pi/pi-dmx-controller-v2/.venv/bin/python /home/pi/pi-dmx-controller-v2/dmx_audio_react.py'
+alias dmx='/home/pi/pi-dmx-controller-v2/.venv/bin/python /home/pi/pi-dmx-controller-v2/dmx_audio_react.py'
 ```
 
 Toggle autostart during development:

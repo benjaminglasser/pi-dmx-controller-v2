@@ -10,9 +10,7 @@ apply_usb() {
   echo "Switching to USB audio..."
   sudo sed -i \
     -e 's/^Environment=AUDIO_INPUT_CHANNEL=left/# Environment=AUDIO_INPUT_CHANNEL=left/' \
-    -e 's/^Environment=DISABLE_I2S_ENCODERS=1/# Environment=DISABLE_I2S_ENCODERS=1/' \
     -e 's/^# *Environment=AUDIO_INPUT_CHANNEL=right/Environment=AUDIO_INPUT_CHANNEL=right/' \
-    -e 's/^# *Environment=DISABLE_I2S_ENCODERS=0/Environment=DISABLE_I2S_ENCODERS=0/' \
     -e 's/^# *Environment=AUDIO_DEVICE_NAME=USB/Environment=AUDIO_DEVICE_NAME=USB/' \
     "$SERVICE_FILE"
   sudo systemctl daemon-reload
@@ -21,7 +19,7 @@ apply_usb() {
   echo ""
   echo "Now using: USB Audio"
   echo "  - Audio: From USB interface (device name contains 'USB')"
-  echo "  - Encoders: All 5 fully functional"
+  echo "  - Encoders: All 5 fully functional (on MCP23017)"
 }
 
 case "$1" in
@@ -29,9 +27,7 @@ case "$1" in
     echo "Switching to HiFiBerry (I2S) audio..."
     sudo sed -i \
       -e 's/^# *Environment=AUDIO_INPUT_CHANNEL=left/Environment=AUDIO_INPUT_CHANNEL=left/' \
-      -e 's/^# *Environment=DISABLE_I2S_ENCODERS=1/Environment=DISABLE_I2S_ENCODERS=1/' \
       -e 's/^Environment=AUDIO_INPUT_CHANNEL=right/# Environment=AUDIO_INPUT_CHANNEL=right/' \
-      -e 's/^Environment=DISABLE_I2S_ENCODERS=0/# Environment=DISABLE_I2S_ENCODERS=0/' \
       -e 's/^Environment=AUDIO_DEVICE_NAME=USB/# Environment=AUDIO_DEVICE_NAME=USB/' \
       "$SERVICE_FILE"
     sudo systemctl daemon-reload
@@ -40,8 +36,7 @@ case "$1" in
     echo ""
     echo "Now using: HiFiBerry (I2S)"
     echo "  - Audio: Left channel from HiFiBerry"
-    echo "  - Encoders: E1/E2 rotation, E3/E5 buttons only"
-    echo "  - E3/E4/E5 rotation disabled (I2S pin conflict)"
+    echo "  - Encoders: All 5 fully functional (on MCP23017)"
     ;;
 
   usb|""|default)
@@ -51,7 +46,7 @@ case "$1" in
   status)
     echo "=== Current Audio Source Configuration ==="
     echo ""
-    grep -E "^Environment=(AUDIO|DISABLE)|^# *Environment=(AUDIO|DISABLE)" "$SERVICE_FILE" | sed 's/^/  /'
+    grep -E "^#? *Environment=AUDIO" "$SERVICE_FILE" | sed 's/^/  /'
     echo ""
     echo "=== Available Input Devices ==="
     sudo /home/pi/pi-dmx-controller-v2/.venv/bin/python -c "
@@ -69,8 +64,8 @@ for i, d in enumerate(sd.query_devices()):
     echo "Usage: $0 [usb|hifiberry|status]"
     echo ""
     echo "  (no argument)  — USB audio (default)"
-    echo "  usb            — USB audio interface, all encoders work"
-    echo "  hifiberry      — HiFiBerry DAC+ ADC (I2S), E3/E4/E5 rotation disabled"
+    echo "  usb            — USB audio interface (all encoders work)"
+    echo "  hifiberry      — HiFiBerry DAC+ ADC (I2S) (all encoders work)"
     echo "  status         — Show current configuration and available devices"
     exit 1
     ;;

@@ -12,20 +12,17 @@ Environment=DMX_UART_MIN_SLOTS=256
 
 # === AUDIO SOURCE SELECTION ===
 # Choose ONE of these configurations by uncommenting the appropriate block.
-# Default in repo: USB (full encoders). Use scripts/audio-source.sh to switch.
+# Default in repo: USB. Use scripts/audio-source.sh to switch.
+# V3: all 5 encoders are on the MCP23017 I2C expander, so audio source has no
+# effect on encoders (the old I2S pin conflict no longer exists).
 
 # --- OPTION A: HiFiBerry DAC+ ADC (I2S HAT) ---
-# Use left channel only, disable E3/E4/E5 rotation (I2S pin conflict)
-# E1, E2 rotation + E3, E5 buttons still work
 Environment=AUDIO_INPUT_CHANNEL=left
-Environment=DISABLE_I2S_ENCODERS=1
 Environment=AUDIO_DEVICE_NAME=hifiberry
 Environment=DETECT_MODE=classic
 
 # --- OPTION B: USB Audio Interface ---
-# All 5 encoders fully functional, uses right channel by default
 # Environment=AUDIO_INPUT_CHANNEL=right
-# Environment=DISABLE_I2S_ENCODERS=0
 # Environment=AUDIO_DEVICE_NAME=USB
 
 ExecStart=/home/pi/pi-dmx-controller-v2/.venv/bin/python /home/pi/pi-dmx-controller-v2/dmx_audio_react.py

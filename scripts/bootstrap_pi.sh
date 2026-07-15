@@ -19,6 +19,18 @@ echo "[3/7] Enable SPI/I2C (non-interactive)"
 sudo raspi-config nonint do_spi 0
 sudo raspi-config nonint do_i2c 0
 
+# raspi-config enables SPI as the default 2-chip-select overlay (dtparam=spi=on),
+# which reserves BOTH CE0/GPIO8 and CE1/GPIO7. The OLED only uses CE0, and the
+# extra button lives on GPIO7, so switch to a single chip-select overlay to free
+# GPIO7. Idempotent: does nothing if already spi0-1cs.
+BOOT_CFG=/boot/firmware/config.txt
+[ -f "$BOOT_CFG" ] || BOOT_CFG=/boot/config.txt
+if grep -qE '^dtparam=spi=on' "$BOOT_CFG"; then
+  sudo sed -i 's/^dtparam=spi=on$/dtoverlay=spi0-1cs/' "$BOOT_CFG"
+elif ! grep -qE '^dtoverlay=spi0-1cs' "$BOOT_CFG"; then
+  echo 'dtoverlay=spi0-1cs' | sudo tee -a "$BOOT_CFG" >/dev/null
+fi
+
 echo "[4/7] ALSA placeholder capture (Pi USB-input-only installs — avoids PortAudio device count zero)"
 sudo sh -c 'echo snd-dummy >/etc/modules-load.d/pi-dmx-alsa-placeholder.conf'
 sudo modprobe snd-dummy 2>/dev/null || true

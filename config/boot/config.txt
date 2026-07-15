@@ -7,7 +7,7 @@
 #
 # Hardware:
 # - USB audio input (no HiFiBerry HAT)
-# - SPI OLED display (EastRising SSD1322 256×64, CE1)
+# - SPI OLED display (EastRising SSD1322 256×64, CE0)
 # - RS485 DMX output via UART (/dev/serial0)
 # - 5 rotary encoders (GPIO)
 # - Bluetooth disabled to free UART for DMX
@@ -17,8 +17,9 @@
 # Enable required buses
 # -----------------------
 
-# SPI for OLED display (spidev0.0 / spidev0.1)
-dtparam=spi=on
+# SPI for OLED display (spidev0.0 only). Single chip-select (CE0/GPIO8) so that
+# CE1/GPIO7 is NOT reserved by the SPI driver and is free for the extra button.
+dtoverlay=spi0-1cs
 
 # I2C (optional peripherals)
 dtparam=i2c_arm=on
@@ -87,5 +88,6 @@ dtoverlay=dwc2,dr_mode=host
 
 [all]
 
-# Use only 1 chip select (CE1) to free GPIO8 for encoder 5 switch
-# This is REQUIRED for the 5-encoder setup
+# SPI single chip-select is configured above (dtoverlay=spi0-1cs): the OLED uses
+# CE0/GPIO8, leaving CE1/GPIO7 free for the extra button. Do NOT use
+# `dtparam=spi=on` (the 2-CS default), which reserves GPIO7 and breaks that button.
