@@ -757,6 +757,14 @@ FFT_SIZE = 1024  # Zero-pad to 1024 for ~43Hz resolution (tradeoff: faster FFT v
 # Optional DSP on the FFT path (defaults off for “normal” full-range analyzer like EQ Eight spectrum)
 FFT_HPF_HZ = float(os.environ.get("FFT_HPF_HZ", "0"))  # 0 = off; set e.g. 40 to cut sub rumble
 FFT_SPECTRAL_FLOOR = float(os.environ.get("FFT_SPECTRAL_FLOOR", "0"))  # After auto-scale; 0 = no squashing
+# FFT spectrum display dB window: band energy at FFT_DB_FLOOR dB maps to the bottom
+# of the bars, FFT_DB_CEIL to the top. The old fixed window was [-60, -10] dB, but
+# line-level HiFiBerry input is quiet (loudest bands ~-58 dBFS) so the whole
+# spectrum clipped to zero and nothing drew. Lower floor lets quiet inputs through;
+# the auto-range/norm stages then fill the height. Raise FFT_DB_FLOOR for hot inputs.
+FFT_DB_FLOOR = float(os.environ.get("FFT_DB_FLOOR", "-72"))
+FFT_DB_CEIL = float(os.environ.get("FFT_DB_CEIL", "-8"))
+_FFT_DB_SPAN = max(1.0, FFT_DB_CEIL - FFT_DB_FLOOR)
 FFT_FLUX_DEADZONE = float(os.environ.get("FFT_FLUX_DEADZONE", "0"))  # 0 = raw spectral flux
 FFT_HYBRID_MIN_LEVEL = float(os.environ.get("FFT_HYBRID_MIN_LEVEL", "0.07"))  # Hybrid detect mode only
 # Dashed horizontal threshold ruler inside the FFT Q band (visual only). Default off — env meter shows level vs thresh.
@@ -3502,7 +3510,7 @@ def audio_loop():
         band_energies *= np.array(FFT_COMPENSATION, dtype=np.float32)
         with np.errstate(divide='ignore', invalid='ignore'):
             db_vals = np.where(band_energies > 1e-10, 20.0 * np.log10(band_energies + 1e-10), -100.0)
-        raw_levels = np.clip((db_vals + 60.0) / 50.0, 0.0, None)
+        raw_levels = np.clip((db_vals - FFT_DB_FLOOR) / _FFT_DB_SPAN, 0.0, None)
         
         fft_flux = get_spectral_flux(raw_levels, prev_band_energies)
         if FFT_FLUX_DEADZONE > 0:
@@ -3591,6 +3599,16 @@ def audio_loop():
                 fft_draw_bands[:] = fft_display_bands
         else:
             fft_draw_bands[:] = fft_display_bands
+
+        if AUDIO_DEBUG and _audio_dbg_count % 40 == 0:
+            print(
+                f"[FFT_DBG] bands.max={float(np.max(fft_bands)):.3f} "
+                f"disp.max={float(np.max(fft_display_bands)):.3f} "
+                f"draw.max={float(np.max(fft_draw_bands)):.3f} "
+                f"recent_max={fft_recent_max:.3f} ar_peak={_fft_ar_peak:.3f} "
+                f"ar_floor={_fft_ar_floor:.3f} autorange={int(FFT_AUTORANGE)}",
+                flush=True,
+            )
 
         # ===== 3-Band Onset Detector ===== (after fft_bands updated this hop)
         global _last_3band_update
