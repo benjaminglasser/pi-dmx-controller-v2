@@ -128,14 +128,14 @@ DEFAULTS_PRESETS = {
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dmx_config")
 
 # Input gain applied to audio (absolute dB). UI shows relative dB with 0 = INPUT_GAIN_REF_DB.
-# Reference calibrated for Behringer UFO202 and similar consumer USB interfaces.
-# IMPORTANT: INPUT_GAIN_REF_DB anchors the visual "0 dB" in Settings. Bumping the
-# underlying default for a calmer chain (e.g. to make FFT visible) does NOT shift
-# the user's 0 point — the UI keeps showing 0 dB at whatever default we choose.
-# Calibrated for the "old" detector: previous +12 dB reference saturated the
-# trigger at 1 on most music, so the reference was lowered by 24 dB. The user's
-# preferred "-24 dB display" operating point now corresponds to 0 dB display.
-INPUT_GAIN_REF_DB = 0    # 0dB display = 0 dB absolute (calibrated for HiFiBerry line-level input)
+# IMPORTANT: INPUT_GAIN_REF_DB anchors the visual "0 dB" in Settings. It does NOT
+# change the actual gain applied — it only shifts where the UI's "0 dB" sits — so
+# we can calibrate the operating point to show 0 dB without altering the signal.
+# Set to +24 dB: the HiFiBerry DAC+ADC line input is low (~-57 dBFS peak, fixed
+# hardware-mode ADC with no analog gain), so ~+24 dB absolute is the normal
+# operating point. Anchoring the reference here makes that read as 0 dB in the UI,
+# with the usual ±24 dB of headroom on either side.
+INPUT_GAIN_REF_DB = 24   # 0 dB display = +24 dB absolute (HiFiBerry line-level operating point)
 INPUT_GAIN_MIN_DB = INPUT_GAIN_REF_DB - 24  # absolute floor (display: -24 dB)
 INPUT_GAIN_MAX_DB = INPUT_GAIN_REF_DB + 24  # absolute ceiling (display: +24 dB)
 INPUT_GAIN_DB = INPUT_GAIN_REF_DB
@@ -918,6 +918,21 @@ _fft_low_smooth = np.zeros(len(FFT_BANDS), dtype=np.float32)
 
 # Display-only smoothed bands (EMA + optional spatial); triggers use raw fft_bands
 fft_display_bands = np.zeros(len(FFT_BANDS), dtype=np.float32)
+
+# --- Visual auto-range (display only) --------------------------------------
+# The drawn spectrum is stretched so its running [floor, peak] fills the bar
+# height, making the shape readable regardless of absolute input level (the
+# HiFiBerry input is quiet, so without this the bars sit squashed near the
+# bottom). This affects ONLY fft_display_bands — triggers use raw fft_bands and
+# are untouched. Set FFT_AUTORANGE=0 to disable and fall back to fixed scaling.
+FFT_AUTORANGE = os.environ.get("FFT_AUTORANGE", "1").strip() != "0"
+FFT_AUTORANGE_TARGET = float(os.environ.get("FFT_AUTORANGE_TARGET", "0.95"))  # running peak -> this height
+FFT_AUTORANGE_PEAK_DECAY = float(os.environ.get("FFT_AUTORANGE_PEAK_DECAY", "0.02"))  # step-down/hop of running peak
+FFT_AUTORANGE_FLOOR_TRACK = float(os.environ.get("FFT_AUTORANGE_FLOOR_TRACK", "0.05"))  # how fast floor follows
+FFT_AUTORANGE_MIN_SPAN = float(os.environ.get("FFT_AUTORANGE_MIN_SPAN", "0.03"))  # don't stretch tiny ranges
+FFT_AUTORANGE_SILENCE = float(os.environ.get("FFT_AUTORANGE_SILENCE", "0.02"))  # below this peak = treat as silent
+_fft_ar_peak = 0.1   # running spectrum peak (fast attack, slow decay)
+_fft_ar_floor = 0.0  # running spectrum floor (low percentile, slow tracking)
 
 # Per-band normalization state (spectral whitening)
 band_running_mean = [0.01] * len(FFT_BANDS)
@@ -3545,7 +3560,28 @@ def audio_loop():
                 fft_display_bands[:] = FFT_DISPLAY_SMOOTH * fft_display_bands + (1.0 - FFT_DISPLAY_SMOOTH) * fft_bands
             else:
                 fft_display_bands[:] = fft_bands
-        
+
+        # ---- Visual auto-range (display only): stretch running [floor, peak] to fill height ----
+        # Makes the spectrum shape readable regardless of absolute level. Does not
+        # touch fft_bands, so triggers are unaffected. Disable with FFT_AUTORANGE=0.
+        if FFT_AUTORANGE:
+            global _fft_ar_peak, _fft_ar_floor
+            cur_peak = float(np.max(fft_display_bands))
+            cur_floor = float(np.percentile(fft_display_bands, 25))
+            # Running peak: instant attack, slow decay toward the current peak.
+            if cur_peak > _fft_ar_peak:
+                _fft_ar_peak = cur_peak
+            else:
+                _fft_ar_peak += (cur_peak - _fft_ar_peak) * FFT_AUTORANGE_PEAK_DECAY
+            # Running floor: follow the low-percentile level slowly (both directions).
+            _fft_ar_floor += (cur_floor - _fft_ar_floor) * FFT_AUTORANGE_FLOOR_TRACK
+            span = _fft_ar_peak - _fft_ar_floor
+            if _fft_ar_peak >= FFT_AUTORANGE_SILENCE and span >= FFT_AUTORANGE_MIN_SPAN:
+                # Map [floor, peak] -> [0, TARGET], filling the bar height.
+                fft_display_bands[:] = np.clip(
+                    (fft_display_bands - _fft_ar_floor) / span * FFT_AUTORANGE_TARGET, 0.0, 1.0)
+            # else: silent / too little dynamic range -> leave bars low (don't amplify noise)
+
         # ===== 3-Band Onset Detector ===== (after fft_bands updated this hop)
         global _last_3band_update
         if three_band_detector is not None:
