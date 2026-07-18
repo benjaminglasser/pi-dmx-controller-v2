@@ -676,7 +676,9 @@ BEAT_DETECT_METHOD = 0
 #   "3-Band" : fixed LOW/MID/HIGH bands (spectral-flux onset); Freq encoder selects the band.
 ANALYSIS_MODES = ["Normal", "Band", "3-Band"]
 ANALYSIS_MODE_SHORT = ["STD", "BND", "3BD"]  # compact labels for the OLED
-ANALYSIS_MODE_INDEX = _LOADED_ANALYSIS_MODE  # restored from config (load_defaults_mode ran above)
+# LOCKED to Normal for now — the Band / 3-Band modes are hidden (code kept, just unreachable).
+# To re-enable: restore `ANALYSIS_MODE_INDEX = _LOADED_ANALYSIS_MODE` and the reset+extra combo below.
+ANALYSIS_MODE_INDEX = 0
 
 # 3-band detector state.
 # THREEBAND_SELECTED: which band (0=LOW, 1=MID, 2=HIGH) drives output in "3-Band" mode.
@@ -3458,51 +3460,26 @@ def encoder_reader():
                         flush=True,
                     )
 
-                # ===== Reset + Extra held together 3s: cycle analysis mode =====
-                # (Normal -> Band -> 3-Band). Shows a countdown modal naming the target mode.
+                # ===== Reset + Extra held together: intentionally does nothing =====
+                # (The analysis-mode switch is disabled while Band/3-Band are hidden.) We still
+                # detect the combo and suppress the individual reset/extra hold actions so that
+                # pressing both buttons together has no effect at all — no save, no reset.
                 both_pressed = (reset_btn == 0 and extra_btn == 0)
-                if both_pressed and not _btn_combo_needs_release:
+                if both_pressed:
                     if _btn_combo_arm_start == 0.0:
-                        # Both just pressed - start 50ms debounce, suppress individual actions.
-                        # Cancel any partial single-button hold so neither reset nor the
-                        # extra-hold-save keeps a stale countdown running.
+                        # Both just pressed - suppress individual actions and cancel any partial
+                        # single-button hold so neither reset nor the extra-hold-save fires.
                         _btn_combo_arm_start = time.monotonic()
                         _btn_combo_suppressed = True
                         _reset_press_time = 0
                         _extra_press_time = 0.0
                         _extra_countdown_active = False
                         _extra_countdown_start = 0.0
-                    elif not _btn_combo_hold_active:
-                        # Debounce elapsed → begin 3s countdown
-                        if time.monotonic() - _btn_combo_arm_start >= 0.5:
-                            _btn_combo_hold_start = time.monotonic()
-                            _btn_combo_hold_active = True
-                    else:
-                        hold_dur = time.monotonic() - _btn_combo_hold_start
-                        if hold_dur >= 3.0 and _btn_combo_hold_complete == 0.0:
-                            ANALYSIS_MODE_INDEX = (ANALYSIS_MODE_INDEX + 1) % len(ANALYSIS_MODES)
-                            _reset_trigger_state()
-                            save_analysis_mode(ANALYSIS_MODE_INDEX)
-                            _btn_combo_hold_complete = time.time()
-                            _btn_combo_hold_active = False
-                            _btn_combo_hold_start = 0.0
-                            _btn_combo_arm_start = 0.0
-                            _btn_combo_needs_release = True
-                            ui_flash(f"Analysis: {ANALYSIS_MODES[ANALYSIS_MODE_INDEX]}", 1.5)
                 else:
-                    if _btn_combo_hold_active or _btn_combo_arm_start > 0.0:
-                        # Released before completing - cancel countdown
-                        _btn_combo_hold_active = False
-                        _btn_combo_hold_start = 0.0
-                        _btn_combo_arm_start = 0.0
-                    # Clear suppression and re-arm only when both buttons fully up
+                    _btn_combo_arm_start = 0.0
+                    # Clear suppression only when both buttons are fully up
                     if reset_btn == 1 and extra_btn == 1:
                         _btn_combo_suppressed = False
-                        _btn_combo_needs_release = False
-
-                # Expire the mode-switch confirm display after 1.5 seconds
-                if _btn_combo_hold_complete > 0 and time.time() - _btn_combo_hold_complete >= 1.5:
-                    _btn_combo_hold_complete = 0.0
 
                 # ===== Reset button (GPIO25): hold 3s = reset band to defaults =====
                 if not _btn_combo_suppressed:
@@ -5567,7 +5544,6 @@ class OledUI:
             self._draw_home_controls(draw, cx, cy + top_height + 2, cw)
             self._draw_reset_modal(draw)
             self._draw_extra_save_modal(draw)   # extra-hold save countdown
-            self._draw_mode_switch_modal(draw)  # reset+extra analysis-mode switch (on top)
 
         try:
             self.device.display(image)
