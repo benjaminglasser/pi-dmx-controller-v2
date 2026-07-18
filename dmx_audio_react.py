@@ -127,6 +127,10 @@ DEFAULTS_PRESETS = {
 # Config file for persisting settings
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dmx_config")
 
+# Analysis mode index loaded from config (applied to ANALYSIS_MODE_INDEX once that constant
+# is defined further down). load_defaults_mode() populates this.
+_LOADED_ANALYSIS_MODE = 0
+
 # Input gain applied to audio (absolute dB). UI shows relative dB with 0 = INPUT_GAIN_REF_DB.
 # IMPORTANT: INPUT_GAIN_REF_DB anchors the visual "0 dB" in Settings. It does NOT
 # change the actual gain applied — it only shifts where the UI's "0 dB" sits — so
@@ -138,11 +142,12 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dmx_con
 INPUT_GAIN_REF_DB = 18   # 0 dB display = +18 dB absolute (HiFiBerry line-level operating point)
 INPUT_GAIN_MIN_DB = INPUT_GAIN_REF_DB - 24  # absolute floor (display: -24 dB)
 INPUT_GAIN_MAX_DB = INPUT_GAIN_REF_DB + 24  # absolute ceiling (display: +24 dB)
-INPUT_GAIN_DB = INPUT_GAIN_REF_DB
+INPUT_GAIN_DB = INPUT_GAIN_REF_DB - 3  # default boots 3 dB below the 0 dB anchor (input ran a bit hot)
 
 def load_defaults_mode():
     """Load defaults mode, DMX output mode, channel count, input gain, and any custom preset values from config."""
     global DEFAULTS_PRESETS, DMX_OUTPUT_MODE, DMX_CHANNEL_COUNT, INPUT_GAIN_DB
+    global _LOADED_ANALYSIS_MODE
     mode_idx = 0
     try:
         if os.path.exists(CONFIG_FILE):
@@ -169,6 +174,13 @@ def load_defaults_mode():
                             gain = int(line.split("=")[1])
                             if INPUT_GAIN_MIN_DB <= gain <= INPUT_GAIN_MAX_DB:
                                 INPUT_GAIN_DB = gain
+                        except ValueError:
+                            pass
+                    elif line.startswith("analysis_mode="):
+                        try:
+                            am = int(line.split("=")[1])
+                            if 0 <= am <= 2:
+                                _LOADED_ANALYSIS_MODE = am
                         except ValueError:
                             pass
                     elif "=" in line:
@@ -216,6 +228,8 @@ def save_defaults_mode(idx):
                             pass
                     elif line.startswith("detect_mode_index="):
                         detect_line = line
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
                     elif "=" in line and not line.startswith("defaults_mode="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -228,6 +242,8 @@ def save_defaults_mode(idx):
             f.write(f"input_gain_db={input_gain}\n")
             if detect_line:
                 f.write(f"{detect_line}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -242,6 +258,7 @@ def save_dmx_output_mode(mode_idx):
         channel_count = DMX_CHANNEL_COUNT
         input_gain = INPUT_GAIN_DB
         detect_line = None
+        analysis_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -261,6 +278,8 @@ def save_dmx_output_mode(mode_idx):
                             pass
                     elif line.startswith("detect_mode_index="):
                         detect_line = line
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
                     elif "=" in line and not line.startswith("dmx_output_mode="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -273,6 +292,8 @@ def save_dmx_output_mode(mode_idx):
             f.write(f"input_gain_db={input_gain}\n")
             if detect_line:
                 f.write(f"{detect_line}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -286,6 +307,7 @@ def save_dmx_channel_count(count):
         output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
         input_gain = INPUT_GAIN_DB
         detect_line = None
+        analysis_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -302,6 +324,8 @@ def save_dmx_channel_count(count):
                             pass
                     elif line.startswith("detect_mode_index="):
                         detect_line = line
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
                     elif "=" in line and not line.startswith("dmx_channel_count="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -314,6 +338,8 @@ def save_dmx_channel_count(count):
             f.write(f"input_gain_db={input_gain}\n")
             if detect_line:
                 f.write(f"{detect_line}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -327,6 +353,7 @@ def save_input_gain(gain_db):
         output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
         channel_count = DMX_CHANNEL_COUNT
         detect_line = None
+        analysis_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -343,6 +370,8 @@ def save_input_gain(gain_db):
                             pass
                     elif line.startswith("detect_mode_index="):
                         detect_line = line
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
                     elif "=" in line and not line.startswith("input_gain_db="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -355,6 +384,56 @@ def save_input_gain(gain_db):
             f.write(f"input_gain_db={gain_db}\n")
             if detect_line:
                 f.write(f"{detect_line}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
+            for key, val in preset_overrides.items():
+                f.write(f"{key}={val}\n")
+    except Exception:
+        pass
+
+def save_analysis_mode(idx):
+    """Save the top-level analysis mode index (0=Normal,1=Band,2=3-Band), preserving others."""
+    try:
+        # Read existing config (everything except analysis_mode is preserved verbatim)
+        defaults_mode = "LOW"
+        output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
+        channel_count = DMX_CHANNEL_COUNT
+        input_gain = INPUT_GAIN_DB
+        detect_line = None
+        preset_overrides = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("defaults_mode="):
+                        defaults_mode = line.split("=")[1]
+                    elif line.startswith("dmx_output_mode="):
+                        output_mode = line.split("=")[1]
+                    elif line.startswith("dmx_channel_count="):
+                        try:
+                            channel_count = int(line.split("=")[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith("input_gain_db="):
+                        try:
+                            input_gain = int(line.split("=")[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith("detect_mode_index="):
+                        detect_line = line
+                    elif "=" in line and not line.startswith("analysis_mode="):
+                        key, val = line.split("=", 1)
+                        if key in DEFAULTS_PRESETS:
+                            preset_overrides[key] = val
+        # Write back with updated analysis mode
+        with open(CONFIG_FILE, 'w') as f:
+            f.write(f"defaults_mode={defaults_mode}\n")
+            f.write(f"dmx_output_mode={output_mode}\n")
+            f.write(f"dmx_channel_count={channel_count}\n")
+            f.write(f"input_gain_db={input_gain}\n")
+            if detect_line:
+                f.write(f"{detect_line}\n")
+            f.write(f"analysis_mode={int(idx)}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -369,6 +448,7 @@ def save_preset_values(mode_name, center_hz, thresh, decay_ms, q, thresh_mode, r
         channel_count = DMX_CHANNEL_COUNT
         input_gain = INPUT_GAIN_DB
         detect_line = None
+        analysis_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -390,6 +470,8 @@ def save_preset_values(mode_name, center_hz, thresh, decay_ms, q, thresh_mode, r
                             pass
                     elif line.startswith("detect_mode_index="):
                         detect_line = line
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
                     elif "=" in line:
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -404,6 +486,8 @@ def save_preset_values(mode_name, center_hz, thresh, decay_ms, q, thresh_mode, r
             f.write(f"input_gain_db={input_gain}\n")
             if detect_line:
                 f.write(f"{detect_line}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -583,6 +667,22 @@ DETECT_MODE_INDEX = DETECT_MODES.index(_dm_env) if _dm_env in DETECT_MODES else 
 # Beat detection method: 0 = FFT_STANDARD (Q-band analysis)
 # 3-band mode has been removed - now using FFT-only mode
 BEAT_DETECT_METHOD = 0
+
+# Top-level analysis mode (cycled by holding the extra button 3s; see encoder_reader).
+# This selects the *analysis* family; controls (Freq/Q/Thresh/Release/Brightness) are the
+# same in every mode.
+#   "Normal" : today's behavior — single tunable band via DETECT_MODES (biquad chain).
+#   "Band"   : same single tunable band, but hits detected from spectral flux (onset).
+#   "3-Band" : fixed LOW/MID/HIGH bands (spectral-flux onset); Freq encoder selects the band.
+ANALYSIS_MODES = ["Normal", "Band", "3-Band"]
+ANALYSIS_MODE_SHORT = ["STD", "BND", "3BD"]  # compact labels for the OLED
+ANALYSIS_MODE_INDEX = _LOADED_ANALYSIS_MODE  # restored from config (load_defaults_mode ran above)
+
+# 3-band detector state.
+# THREEBAND_SELECTED: which band (0=LOW, 1=MID, 2=HIGH) drives output in "3-Band" mode.
+# THREEBAND_VIEW_MODE: which OLED 3-band view to draw (0=spectrum, 1=rectangles, 2=detail).
+THREEBAND_SELECTED = 0
+THREEBAND_VIEW_MODE = 0
 
 # 3-band detector update rate (kept for legacy code compatibility)
 _last_3band_update = 0.0
@@ -897,9 +997,12 @@ def get_all_band_energies_vectorized(fft_mag):
 
 # Visual gain for FFT display: uniform multiplier on bar height (display only).
 # Scales every bar up equally so the spectrum is more defined, preserving the
-# relative shape (louder still reads taller); the tallest peaks just clip at the
-# top. Does not change the input or the trigger. Tune live via FFT_VISUAL_GAIN.
-FFT_VISUAL_GAIN = float(os.environ.get("FFT_VISUAL_GAIN", "1.75"))
+# relative shape (louder still reads taller). NOTE: the auto-scale stage already
+# normalizes the loudest band to 1.0, so a gain >1.0 guarantees the top of the
+# spectrum clips flat against the ceiling. Keep <=1.0 for headroom; 0.9 leaves
+# the peak band just shy of the top. Does not change the input or the trigger.
+# Tune live via FFT_VISUAL_GAIN.
+FFT_VISUAL_GAIN = float(os.environ.get("FFT_VISUAL_GAIN", "0.9"))
 
 # FFT state (numpy arrays for faster vectorized operations)
 fft_bands = np.zeros(len(FFT_BANDS), dtype=np.float32)
@@ -1127,15 +1230,23 @@ _reset_countdown_start = 0.0      # Monotonic time when 50ms debounce elapsed an
 _reset_countdown_complete = 0.0   # Wall time when reset executed (drives "Reset!" display)
 _reset_needs_release = False      # Blocks re-trigger until button fully released
 _extra_last_state = 1  # Extra button (GPIO7) state (1 = not pressed)
+# Extra button hold-3s = cycle analysis mode (mirrors the reset button's hold logic).
+# A short tap (released before the countdown finishes) keeps the old action: cycle submenu column.
+_extra_press_time = 0.0        # Monotonic time when extra button was pressed (debounce arm)
+_extra_countdown_active = False    # True during 3s countdown
+_extra_countdown_start = 0.0       # Monotonic time when debounce elapsed and countdown began
+_extra_countdown_complete = 0.0    # Wall time when mode cycle executed (drives flash)
+_extra_needs_release = False       # Blocks re-trigger until button fully released
 
-# Dual-button save combo: hold Reset + Extra together for 3 seconds to save current
-# freq/trigger settings into whichever defaults preset is currently active.
-_btn_save_arm_start = 0.0     # Monotonic time when both buttons were first pressed (50ms debounce)
-_btn_save_hold_start = 0.0    # Monotonic time when debounce elapsed and 3s countdown began
-_btn_save_hold_active = False  # True while 3s countdown is running
-_btn_save_hold_complete = 0.0  # Wall time when save completed (drives "Saved!" flash)
-_btn_save_suppressed = False   # Suppress individual button actions for this press cycle
-_btn_save_needs_release = False  # True after save; blocks re-trigger until both buttons fully released
+# Dual-button combo: hold Reset + Extra together for 3 seconds to cycle the analysis mode
+# (Normal -> Band -> 3-Band). Also acts as the suppressor so the individual reset/extra
+# hold actions don't fire while both buttons are down.
+_btn_combo_arm_start = 0.0     # Monotonic time when both buttons were first pressed (50ms debounce)
+_btn_combo_hold_start = 0.0    # Monotonic time when debounce elapsed and 3s countdown began
+_btn_combo_hold_active = False  # True while 3s countdown is running
+_btn_combo_hold_complete = 0.0  # Wall time when the mode switch completed (drives confirm flash)
+_btn_combo_suppressed = False   # Suppress individual button actions for this press cycle
+_btn_combo_needs_release = False  # True after switch; blocks re-trigger until both buttons fully released
 
 # Encoder state for all 5 encoders
 # Encoders 1-4: Page, Param A, Param B, Param C (indices 0-3)
@@ -1791,6 +1902,14 @@ OLD_AGC_MAX_GAIN     = 20.0
 _old_classic_abs_ema = 0.0
 _old_agc             = None  # lazily constructed on first use to honor module-level Agc
 
+# "Band" analysis mode: spectral-flux onset within the selected Q window.
+# Source is `q_flux_mean` (mean half-wave-rectified spectral flux over the FFT bands inside
+# band.center ± bandwidth/2). We normalize it against a slowly-decaying running max — like
+# the compander/kick onset stages — so the 0..1 score is consistent across input levels.
+FLUX_BAND_LEVEL_BLEND = float(os.environ.get("FLUX_BAND_LEVEL_BLEND", "0.25"))  # add a little level so sustained energy still reads
+_flux_band_smax     = 0.01   # decaying max of q_flux_mean (onset normalizer)
+_flux_band_meter_ema = 0.0   # smoothed meter for display
+
 
 def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
     """Faithful restore of the old project's signal chain, with noise gate.
@@ -1970,6 +2089,47 @@ def _trigger_old(display_mean_in_q):
     return val, val
 
 
+def _trigger_flux_band(q_flux_mean, display_mean_in_q):
+    """"Band" analysis mode — spectral-flux onset within the selected Q window.
+
+    Source: `q_flux_mean` — mean half-wave-rectified spectral flux across the FFT bands
+    inside band.center ± bandwidth/2 (the paper's onset descriptor, restricted to the
+    user-selected frequency window). Normalized against a decaying running max so the score
+    is level-independent, then a little steady level (`display_mean_in_q`) is blended in so
+    sustained tones still register.
+    Returns: (meter, trigger_score) — score drives the trigger, meter drives the display.
+    """
+    global _flux_band_smax, _flux_band_meter_ema
+    flux = max(0.0, float(q_flux_mean))
+    # Decaying running max for onset normalization (same idea as the compander onset stage).
+    _flux_band_smax = max(_flux_band_smax * 0.995, flux)
+    onset = flux / max(_flux_band_smax, 1e-6)
+    onset = max(0.0, min(1.0, onset))
+    level = max(0.0, min(1.0, float(display_mean_in_q)))
+    score = max(0.0, min(1.0, onset + FLUX_BAND_LEVEL_BLEND * level))
+    _flux_band_meter_ema = ENV_EMA * _flux_band_meter_ema + (1.0 - ENV_EMA) * score
+    return _flux_band_meter_ema, score
+
+
+def _trigger_flux_3band():
+    """"3-Band" analysis mode — spectral-flux onset from the selected fixed band.
+
+    LOW/MID/HIGH onsets are computed every hop by `three_band_detector` (analyze -> lag ->
+    slope -> gain), and THREEBAND_SELECTED (driven by the Freq encoder) picks which band
+    drives output. The band's normalized slope is the trigger score; band.thresh (the Thresh
+    encoder) is the fire level, so all controls keep working.
+    Returns: (meter, trigger_score).
+    """
+    if three_band_detector is None:
+        return 0.0, 0.0
+    bi = max(0, min(2, THREEBAND_SELECTED))
+    score = float(three_band_detector.normalized_slope[bi])
+    meter = float(three_band_detector.display_flux[bi])
+    score = max(0.0, min(1.0, score))
+    meter = max(0.0, min(1.0, meter))
+    return meter, score
+
+
 def _reset_trigger_state():
     """Clear per-mode running state (used on mode switch or reset)."""
     global _comp_running_rms, _comp_running_peak, _comp_running_smax
@@ -1978,6 +2138,9 @@ def _reset_trigger_state():
     global _kick_prev_e, _kick_peak_hold, _kick_peak_t
     global classic_abs_ema
     global _old_classic_abs_ema, _old_agc, _old_fft_ema
+    global _flux_band_smax, _flux_band_meter_ema
+    _flux_band_smax = 0.01
+    _flux_band_meter_ema = 0.0
     _comp_running_rms = 0.001
     _comp_running_peak = 0.05
     _comp_running_smax = 0.01
@@ -2584,7 +2747,8 @@ def _apply_encoder_delta(enc_idx, direction):
     global _reactive_brightness_scale, _effective_brightness_display, _brightness_knob_last_turn
     global _effective_release_display, _release_knob_last_turn
     global ambient_speed, ambient_fade_time
-    
+    global THREEBAND_SELECTED
+
     if DEV_NO_HW:
         return
     if time.time() < IGNORE_KNOBS_UNTIL:
@@ -2609,6 +2773,15 @@ def _apply_encoder_delta(enc_idx, direction):
         if enc_idx == 1:
             if BASE_PROGRAM == 6:
                 ambient_speed = max(0.2, min(8.0, ambient_speed + base_delta * 0.1))
+            elif ANALYSIS_MODE_INDEX == 2 and not _home_enc2_alt:
+                # 3-Band mode: Freq encoder selects which band (LOW/MID/HIGH) drives output.
+                THREEBAND_SELECTED = max(0, min(2, THREEBAND_SELECTED + base_delta))
+                if three_band_detector is not None:
+                    ui_flash(f"Band: {three_band_detector.bands[THREEBAND_SELECTED].name}", 0.5)
+            elif ANALYSIS_MODE_INDEX == 2 and _home_enc2_alt:
+                # 3-Band mode: Q encoder adjusts the selected band's width (~5% per click).
+                if three_band_detector is not None:
+                    three_band_detector.adjust_width(THREEBAND_SELECTED, base_delta * 5.0)
             elif _home_enc2_alt:
                 # Range (Q): one quadrature step = one OLED unit (0–99), no velocity.
                 # Use a stored integer step index so band.q round-trip cannot collapse two ticks to one.
@@ -3111,6 +3284,9 @@ def encoder_reader():
     global _setup_enc3_detect, _setup_enc4_channels
     global _brightness_click_flash, _brightness_enc5sw_state
     global _extra_last_state
+    global _extra_press_time, _extra_countdown_active, _extra_countdown_start
+    global _extra_countdown_complete, _extra_needs_release
+    global ANALYSIS_MODE_INDEX
 
     if DEV_NO_HW:
         return
@@ -3269,60 +3445,67 @@ def encoder_reader():
                 _enc_last_sw[4] = enc5_sw
 
                 # ===== Read both direct buttons upfront for combo detection =====
-                global _btn_save_arm_start, _btn_save_hold_start, _btn_save_hold_active
-                global _btn_save_hold_complete, _btn_save_suppressed, _btn_save_needs_release
+                global _btn_combo_arm_start, _btn_combo_hold_start, _btn_combo_hold_active
+                global _btn_combo_hold_complete, _btn_combo_suppressed, _btn_combo_needs_release
                 reset_btn = GPIO.input(RESET_BUTTON_GPIO)
                 extra_btn = GPIO.input(EXTRA_BUTTON_GPIO)
 
                 if BTN_DEBUG and (extra_btn != _extra_last_state or reset_btn != _reset_last_state):
                     print(
                         f"[BTN] reset={reset_btn} extra={extra_btn} "
-                        f"suppressed={_btn_save_suppressed} needs_release={_btn_save_needs_release} "
+                        f"suppressed={_btn_combo_suppressed} needs_release={_btn_combo_needs_release} "
                         f"tab={submenu_tab}({SUBMENU_TABS[submenu_tab]}) col={submenu_column}",
                         flush=True,
                     )
 
-                # ===== Reset + Extra held together 3s: save current settings into active preset =====
+                # ===== Reset + Extra held together 3s: cycle analysis mode =====
+                # (Normal -> Band -> 3-Band). Shows a countdown modal naming the target mode.
                 both_pressed = (reset_btn == 0 and extra_btn == 0)
-                if both_pressed and not _btn_save_needs_release:
-                    if _btn_save_arm_start == 0.0:
-                        # Both just pressed - start 50ms debounce, suppress individual actions
-                        _btn_save_arm_start = time.monotonic()
-                        _btn_save_suppressed = True
+                if both_pressed and not _btn_combo_needs_release:
+                    if _btn_combo_arm_start == 0.0:
+                        # Both just pressed - start 50ms debounce, suppress individual actions.
+                        # Cancel any partial single-button hold so neither reset nor the
+                        # extra-hold-save keeps a stale countdown running.
+                        _btn_combo_arm_start = time.monotonic()
+                        _btn_combo_suppressed = True
                         _reset_press_time = 0
-                    elif not _btn_save_hold_active:
+                        _extra_press_time = 0.0
+                        _extra_countdown_active = False
+                        _extra_countdown_start = 0.0
+                    elif not _btn_combo_hold_active:
                         # Debounce elapsed → begin 3s countdown
-                        if time.monotonic() - _btn_save_arm_start >= 0.5:
-                            _btn_save_hold_start = time.monotonic()
-                            _btn_save_hold_active = True
+                        if time.monotonic() - _btn_combo_arm_start >= 0.5:
+                            _btn_combo_hold_start = time.monotonic()
+                            _btn_combo_hold_active = True
                     else:
-                        hold_dur = time.monotonic() - _btn_save_hold_start
-                        if hold_dur >= 3.0 and _btn_save_hold_complete == 0.0:
-                            save_current_as_default()
-                            mode_name = DEFAULTS_MODES[DEFAULTS_MODE_INDEX]
-                            _btn_save_hold_complete = time.time()
-                            _btn_save_hold_active = False
-                            _btn_save_hold_start = 0.0
-                            _btn_save_arm_start = 0.0
-                            _btn_save_needs_release = True
-                            ui_flash(f"Saved! ({mode_name})", 1.5)
+                        hold_dur = time.monotonic() - _btn_combo_hold_start
+                        if hold_dur >= 3.0 and _btn_combo_hold_complete == 0.0:
+                            ANALYSIS_MODE_INDEX = (ANALYSIS_MODE_INDEX + 1) % len(ANALYSIS_MODES)
+                            _reset_trigger_state()
+                            save_analysis_mode(ANALYSIS_MODE_INDEX)
+                            _btn_combo_hold_complete = time.time()
+                            _btn_combo_hold_active = False
+                            _btn_combo_hold_start = 0.0
+                            _btn_combo_arm_start = 0.0
+                            _btn_combo_needs_release = True
+                            ui_flash(f"Analysis: {ANALYSIS_MODES[ANALYSIS_MODE_INDEX]}", 1.5)
                 else:
-                    if _btn_save_hold_active or _btn_save_arm_start > 0.0:
+                    if _btn_combo_hold_active or _btn_combo_arm_start > 0.0:
                         # Released before completing - cancel countdown
-                        _btn_save_hold_active = False
-                        _btn_save_hold_start = 0.0
-                        _btn_save_arm_start = 0.0
+                        _btn_combo_hold_active = False
+                        _btn_combo_hold_start = 0.0
+                        _btn_combo_arm_start = 0.0
                     # Clear suppression and re-arm only when both buttons fully up
                     if reset_btn == 1 and extra_btn == 1:
-                        _btn_save_suppressed = False
-                        _btn_save_needs_release = False
+                        _btn_combo_suppressed = False
+                        _btn_combo_needs_release = False
 
-                # Expire the "Saved!" display after 1.5 seconds
-                if _btn_save_hold_complete > 0 and time.time() - _btn_save_hold_complete >= 1.5:
-                    _btn_save_hold_complete = 0.0
+                # Expire the mode-switch confirm display after 1.5 seconds
+                if _btn_combo_hold_complete > 0 and time.time() - _btn_combo_hold_complete >= 1.5:
+                    _btn_combo_hold_complete = 0.0
 
                 # ===== Reset button (GPIO25): hold 3s = reset band to defaults =====
-                if not _btn_save_suppressed:
+                if not _btn_combo_suppressed:
                     if reset_btn == 0 and _reset_last_state == 1 and not _reset_needs_release:
                         # Just pressed - arm debounce
                         _reset_press_time = time.monotonic()
@@ -3374,14 +3557,50 @@ def encoder_reader():
 
                 _reset_last_state = reset_btn
 
-                # ===== Extra button (GPIO7): cycle section within current tab =====
-                if not _btn_save_suppressed:
-                    if extra_btn == 0 and _extra_last_state == 1:
-                        _tab_name = SUBMENU_TABS[submenu_tab]
-                        _max_col = 1 if _tab_name in ("Setup", "Settings") else 2
-                        submenu_column = (submenu_column + 1) % (_max_col + 1)
-                        _col_label = SUBMENU_LABELS.get(_tab_name, [""])[submenu_column]
-                        ui_flash(_col_label if _col_label else _tab_name, 0.4)
+                # ===== Extra button (GPIO7) =====
+                # Hold 3s = save current settings into the active preset (shows a "Save"
+                # countdown modal). Short tap = cycle the submenu column within the current tab
+                # (original behavior). Mirrors the reset button's hold logic above.
+                if not _btn_combo_suppressed:
+                    if extra_btn == 0 and _extra_last_state == 1 and not _extra_needs_release:
+                        # Just pressed - arm debounce
+                        _extra_press_time = time.monotonic()
+                    elif extra_btn == 0 and _extra_last_state == 0 and _extra_press_time > 0:
+                        # Being held
+                        if not _extra_countdown_active:
+                            if time.monotonic() - _extra_press_time >= 0.5:
+                                _extra_countdown_start = time.monotonic()
+                                _extra_countdown_active = True
+                        else:
+                            if time.monotonic() - _extra_countdown_start >= 3.0 and _extra_countdown_complete == 0.0:
+                                save_current_as_default()
+                                _extra_countdown_complete = time.time()
+                                _extra_countdown_active = False
+                                _extra_countdown_start = 0.0
+                                _extra_press_time = 0.0
+                                _extra_needs_release = True
+                                ui_flash(f"Saved! ({DEFAULTS_MODES[DEFAULTS_MODE_INDEX]})", 1.5)
+                    elif extra_btn == 1 and _extra_last_state == 0:
+                        if _extra_press_time > 0 and not _extra_needs_release:
+                            # Released before countdown finished: original short-tap action —
+                            # cycle submenu column within the current tab.
+                            _tab_name = SUBMENU_TABS[submenu_tab]
+                            _max_col = 1 if _tab_name in ("Setup", "Settings") else 2
+                            submenu_column = (submenu_column + 1) % (_max_col + 1)
+                            _col_label = SUBMENU_LABELS.get(_tab_name, [""])[submenu_column]
+                            ui_flash(_col_label if _col_label else _tab_name, 0.4)
+                        _extra_countdown_active = False
+                        _extra_countdown_start = 0.0
+                        _extra_press_time = 0.0
+                        _extra_needs_release = False
+                else:
+                    if extra_btn == 1 and _extra_last_state == 0:
+                        _extra_press_time = 0.0  # clear any stale timer
+
+                # Expire the "Saved!" display after 1.5 seconds
+                if _extra_countdown_complete > 0 and time.time() - _extra_countdown_complete >= 1.5:
+                    _extra_countdown_complete = 0.0
+
                 _extra_last_state = extra_btn
 
             except RuntimeError:
@@ -3713,25 +3932,37 @@ def audio_loop():
             normalized_q = (raw_q_level - _q_band_recent_min) / q_range
             display_mean_in_q = min(1.0, max(0.0, normalized_q))
 
-        detect_mode = DETECT_MODES[DETECT_MODE_INDEX]
-        # Per-mode trigger pipeline (each mode keeps its own running state in module globals).
-        # FFT spectrum display above is unaffected; only the trigger compare changes.
-        if detect_mode == "compander":
-            live_band_env, trigger_score = _trigger_compander(x, bp, envd)
+        # Top-level analysis mode selects the trigger family. Controls (Freq/Q/Thresh/
+        # Release/Brightness) feed all families identically; only the detection differs.
+        if ANALYSIS_MODE_INDEX == 1:
+            # "Band": spectral-flux onset within the selected Q window.
+            live_band_env, trigger_score = _trigger_flux_band(q_flux_mean, display_mean_in_q)
             effective_thresh = band.thresh
-        elif detect_mode == "kick":
-            live_band_env, trigger_score = _trigger_kick(x, bp)
-            # Kick mode: noise-floor-aware effective threshold (never fires below floor)
-            effective_thresh = _trigger_kick_effective_thresh()
-        elif detect_mode == "old":
-            # FFT-window level detector: source is the mean of normalized FFT bands
-            # inside band.center ± bandwidth/2 — identical to the highlighted bars
-            # on the visible spectrum. Out-of-band content cannot drive the trigger.
-            live_band_env, trigger_score = _trigger_old(display_mean_in_q)
+        elif ANALYSIS_MODE_INDEX == 2:
+            # "3-Band": spectral-flux onset from the Freq-selected LOW/MID/HIGH band.
+            live_band_env, trigger_score = _trigger_flux_3band()
             effective_thresh = band.thresh
-        else:  # "classic" (default / index 0)
-            live_band_env, trigger_score = _trigger_classic(x, bp, envd, agc)
-            effective_thresh = band.thresh
+        else:
+            # "Normal": existing DETECT_MODES pipeline (biquad chain), unchanged.
+            detect_mode = DETECT_MODES[DETECT_MODE_INDEX]
+            # Per-mode trigger pipeline (each mode keeps its own running state in module globals).
+            # FFT spectrum display above is unaffected; only the trigger compare changes.
+            if detect_mode == "compander":
+                live_band_env, trigger_score = _trigger_compander(x, bp, envd)
+                effective_thresh = band.thresh
+            elif detect_mode == "kick":
+                live_band_env, trigger_score = _trigger_kick(x, bp)
+                # Kick mode: noise-floor-aware effective threshold (never fires below floor)
+                effective_thresh = _trigger_kick_effective_thresh()
+            elif detect_mode == "old":
+                # FFT-window level detector: source is the mean of normalized FFT bands
+                # inside band.center ± bandwidth/2 — identical to the highlighted bars
+                # on the visible spectrum. Out-of-band content cannot drive the trigger.
+                live_band_env, trigger_score = _trigger_old(display_mean_in_q)
+                effective_thresh = band.thresh
+            else:  # "classic" (default / index 0)
+                live_band_env, trigger_score = _trigger_classic(x, bp, envd, agc)
+                effective_thresh = band.thresh
 
         live_threshold = band.thresh
 
@@ -3971,12 +4202,25 @@ class OledUI:
         if DEV_NO_HW or not _OLED_AVAILABLE:
             return
         try:
+            # Tunable via env for debugging startup glitches:
+            #   OLED_SPI_HZ (default 4000000; 8MHz glitches on this panel, <1MHz too slow to refresh)
+            #   OLED_RESET_HOLD / OLED_RESET_SETTLE (seconds; luma default 0 = unreliable reset)
+            def _envf(name, default):
+                try:
+                    return float(os.environ.get(name, "").strip() or default)
+                except ValueError:
+                    return default
+            _spi_hz = int(_envf("OLED_SPI_HZ", 4000000))
+            _rst_hold = _envf("OLED_RESET_HOLD", 0.1)
+            _rst_settle = _envf("OLED_RESET_SETTLE", 0.1)
             serial = luma_spi(
                 device=OLED_SPI_DEV,
                 port=0,
-                bus_speed_hz=8000000,  # 8MHz SPI (reduce to 4MHz if display glitches)
+                bus_speed_hz=_spi_hz,
                 gpio_DC=OLED_DC_PIN,
                 gpio_RST=OLED_RST_PIN,
+                reset_hold_time=_rst_hold,
+                reset_release_time=_rst_settle,
             )
             self.device = ssd1322(serial, width=width, height=height, rotate=2, framebuffer=luma_full_frame())
             # luma's default is contrast(0x7F); SSD1322 often looks washed out. Max by default, override with OLED_CONTRAST=0-255
@@ -5142,24 +5386,28 @@ class OledUI:
         ty2 = ty1 + h1 + pad_y
         draw.text((tx2, ty2), line2, font=self._font, fill=OLED_WHITE)
 
-    def _draw_save_preset_modal(self, draw):
-        """Centered modal for the Reset+Extra 3-second save combo countdown."""
+    def _draw_mode_switch_modal(self, draw):
+        """Centered modal for the Reset+Extra 3-second analysis-mode switch countdown.
+
+        During the countdown it names the mode it will switch TO (plus the seconds digit);
+        on completion it confirms the new mode."""
         now = time.time()
-        if not _btn_save_hold_active and _btn_save_hold_complete == 0.0:
+        if not _btn_combo_hold_active and _btn_combo_hold_complete == 0.0:
             return
         W, H = self.width, self.height
         pad_x, pad_y, border = 12, 6, 2
 
-        if _btn_save_hold_complete > 0 and now - _btn_save_hold_complete < 1.5:
-            # Post-save: show "Saved!" + preset name
-            mode_name = DEFAULTS_MODES[DEFAULTS_MODE_INDEX]
-            line1 = "Saved!"
-            line2 = mode_name
-        elif _btn_save_hold_active:
-            elapsed = time.monotonic() - _btn_save_hold_start
+        if _btn_combo_hold_complete > 0 and now - _btn_combo_hold_complete < 1.5:
+            # Post-switch: confirm the mode that is now active.
+            line1 = "Mode"
+            line2 = ANALYSIS_MODES[ANALYSIS_MODE_INDEX]
+        elif _btn_combo_hold_active:
+            elapsed = time.monotonic() - _btn_combo_hold_start
             remaining = max(0.0, 3.0 - elapsed)
             digit = str(max(1, math.ceil(remaining)))
-            line1 = "Save"
+            # Name the mode it will switch to (the next one in the cycle).
+            target = ANALYSIS_MODES[(ANALYSIS_MODE_INDEX + 1) % len(ANALYSIS_MODES)]
+            line1 = f"> {target}"
             line2 = digit
         else:
             return
@@ -5189,6 +5437,52 @@ class OledUI:
         ty1 = iy0 + pad_y
         draw.text((tx1, ty1), line1, font=self._font_small, fill=OLED_WHITE)
         # Line 2 centered (bigger font)
+        tx2 = ix0 + (ix1 - ix0 - w2) // 2
+        ty2 = ty1 + h1 + pad_y
+        draw.text((tx2, ty2), line2, font=self._font, fill=OLED_WHITE)
+
+    def _draw_extra_save_modal(self, draw):
+        """Centered modal for the Extra-button 3-second save-to-preset countdown."""
+        now = time.time()
+        if not _extra_countdown_active and _extra_countdown_complete == 0.0:
+            return
+        W, H = self.width, self.height
+        pad_x, pad_y, border = 12, 6, 2
+
+        if _extra_countdown_complete > 0 and now - _extra_countdown_complete < 1.5:
+            # Post-save: show "Saved!" + preset name
+            line1 = "Saved!"
+            line2 = DEFAULTS_MODES[DEFAULTS_MODE_INDEX]
+        elif _extra_countdown_active:
+            elapsed = time.monotonic() - _extra_countdown_start
+            remaining = max(0.0, 3.0 - elapsed)
+            line1 = "Save"
+            line2 = str(max(1, math.ceil(remaining)))
+        else:
+            return
+
+        def _measure(txt, font):
+            try:
+                bb = draw.textbbox((0, 0), txt, font=font)
+                return bb[2] - bb[0], bb[3] - bb[1]
+            except Exception:
+                return len(txt) * 6, 8
+
+        w1, h1 = _measure(line1, self._font_small)
+        w2, h2 = _measure(line2, self._font)
+        box_w = max(w1, w2) + pad_x * 2 + border * 2
+        box_h = h1 + h2 + pad_y * 3 + border * 2
+        bx0 = (W - box_w) // 2
+        by0 = (H - box_h) // 2
+        bx1 = bx0 + box_w - 1
+        by1 = by0 + box_h - 1
+        draw.rectangle((bx0, by0, bx1, by1), fill=OLED_WHITE)
+        ix0, iy0 = bx0 + border, by0 + border
+        ix1, iy1 = bx1 - border, by1 - border
+        draw.rectangle((ix0, iy0, ix1, iy1), fill=OLED_BLACK)
+        tx1 = ix0 + (ix1 - ix0 - w1) // 2
+        ty1 = iy0 + pad_y
+        draw.text((tx1, ty1), line1, font=self._font_small, fill=OLED_WHITE)
         tx2 = ix0 + (ix1 - ix0 - w2) // 2
         ty2 = ty1 + h1 + pad_y
         draw.text((tx2, ty2), line2, font=self._font, fill=OLED_WHITE)
@@ -5242,7 +5536,12 @@ class OledUI:
             gap_y = 1
             fft_h = inner_h - meter_h - gap_y
             fft_h = max(8, fft_h)
-            self._draw_fft_spectrum(draw, inner_x, inner_y, inner_w, fft_h)
+            if ANALYSIS_MODE_INDEX == 2 and three_band_detector is not None:
+                # 3-Band analysis: show the LOW/MID/HIGH view with the selected band highlighted.
+                self._draw_3band_vu(draw, inner_x, inner_y, inner_w, fft_h)
+            else:
+                # Normal / Band analysis: standard FFT spectrum with the Q window.
+                self._draw_fft_spectrum(draw, inner_x, inner_y, inner_w, fft_h)
             self._draw_env_meter_h(
                 draw,
                 inner_x,
@@ -5267,7 +5566,8 @@ class OledUI:
             # Bottom: HOME controls (4 columns) - pushed down
             self._draw_home_controls(draw, cx, cy + top_height + 2, cw)
             self._draw_reset_modal(draw)
-            self._draw_save_preset_modal(draw)  # save combo modal always renders on top
+            self._draw_extra_save_modal(draw)   # extra-hold save countdown
+            self._draw_mode_switch_modal(draw)  # reset+extra analysis-mode switch (on top)
 
         try:
             self.device.display(image)
