@@ -135,12 +135,12 @@ _LOADED_ANALYSIS_MODE = 0
 # IMPORTANT: INPUT_GAIN_REF_DB anchors the visual "0 dB" in Settings. It does NOT
 # change the actual gain applied — it only shifts where the UI's "0 dB" sits — so
 # we can calibrate the operating point to show 0 dB without altering the signal.
-# Calibrated to +6 dB absolute: the earlier +18 dB assumption (from a supposedly
-# low HiFiBerry line input) ran the FFT far too hot in practice — a reasonable
-# spectrum needed ~+6 dB absolute (which read as -12 dB on the old scale). Anchoring
-# the reference here makes that good operating point read as 0 dB in the UI, and the
-# default now boots exactly at that 0 dB anchor, with ±24 dB of headroom on either side.
-INPUT_GAIN_REF_DB = 6    # 0 dB display = +6 dB absolute (measured good FFT operating point)
+# Calibrated to -2 dB absolute: the earlier +6 dB anchor ran the input hot, which
+# slammed the band-envelope meter to full and made the beat read "always on" (a hot
+# input feeds straight into the detector's envelope). ~-2 dB absolute keeps hits
+# well-defined without pinning. Anchoring the reference here makes that good level
+# read as 0 dB in the UI, and the default boots exactly at that 0 dB anchor.
+INPUT_GAIN_REF_DB = -2   # 0 dB display = -2 dB absolute (measured good operating point)
 INPUT_GAIN_MIN_DB = INPUT_GAIN_REF_DB - 24  # absolute floor (display: -24 dB)
 INPUT_GAIN_MAX_DB = INPUT_GAIN_REF_DB + 24  # absolute ceiling (display: +24 dB)
 INPUT_GAIN_DB = INPUT_GAIN_REF_DB  # default boots at the 0 dB anchor (the calibrated good level)
@@ -552,6 +552,14 @@ _audio_q_depth_max = 0
 ENV_EMA       = 0.55   # Restored old-project value; smooth envelope without chatter
 AGC_ON        = True
 AGC_TARGET    = 0.020
+# Classic band-envelope follower times. RELEASE is how fast the meter falls back
+# after a hit — the "recoil". Too slow (old 80ms) + a fixed gain that slams the
+# meter to full means it never drops between fast kicks and reads "always on".
+# ~40ms recoils cleanly between kicks up to very fast tempos while still riding
+# over a single kick's body (so one kick = one bump, not a burst). Attack stays
+# fast so transients aren't missed. Tune via env if needed.
+CLASSIC_ATTACK_MS  = float(os.environ.get("CLASSIC_ATTACK_MS", "8").strip() or "8")
+CLASSIC_RELEASE_MS = float(os.environ.get("CLASSIC_RELEASE_MS", "40").strip() or "40")
 # CLASSIC_UI_SCALE divides the AGC-stabilized envelope so the meter has dynamic
 # range. AGC pulls the post-EMA value toward AGC_TARGET (=0.02) at steady state;
 # with scale=3.0, denom=0.06 → average music sits at ~0.33 on the 0..1 meter and
@@ -565,7 +573,20 @@ NOISE_GATE_RMS = float(os.environ.get("NOISE_GATE_RMS", "0.0008"))
 # Cap the AGC's maximum gain (was 20×). 8× ≈ +18 dB still amplifies quiet music,
 # but won't pump silence to full scale.
 AGC_MAX_GAIN = float(os.environ.get("AGC_MAX_GAIN", "8.0"))
-# AGC "auto-calibrate, then hold": the AGC adapts only during a short window of
+
+# How the classic detector's gain (the multiplier that scales the band envelope so
+# hits are well-defined on the meter) is chosen. AGC_GAIN_MODE:
+#   "fixed"      (DEFAULT): apply a constant AGC_FIXED_GAIN every block. Same boost
+#                every run, nothing to auto-detect, so a threshold set once always
+#                means the same thing. Tune AGC_FIXED_GAIN up/down so hits sit where
+#                you want on the meter — that's the only knob.
+#   "calibrate": peak-gated auto-calibrate-then-hold (see AGC_CALIBRATE_HITS below).
+#   "continuous": always-adapting AGC (original behavior; levels/pumps over time).
+# AGC_ON=0 disables the boost entirely (gain = 1.0).
+AGC_GAIN_MODE  = os.environ.get("AGC_GAIN_MODE", "fixed").strip().lower()
+AGC_FIXED_GAIN = float(os.environ.get("AGC_FIXED_GAIN", "3.0").strip() or "3.0")
+
+# AGC "auto-calibrate, then hold" (only used when AGC_GAIN_MODE=calibrate): adapts during a short window of
 # signal-present blocks, then FREEZES its gain, so a given hit always reads the
 # same level and a fixed threshold stays valid.
 #
@@ -584,6 +605,19 @@ AGC_CALIBRATE_HITS     = int(os.environ.get("AGC_CALIBRATE_HITS", "8").strip() o
 CLASSIC_ONSET_RATIO    = float(os.environ.get("CLASSIC_ONSET_RATIO", "1.6").strip() or "1.6")     # peak must exceed this × its moving avg to count as a hit
 CLASSIC_ONSET_MIN_MULT = float(os.environ.get("CLASSIC_ONSET_MIN_MULT", "3.0").strip() or "3.0")  # …and exceed NOISE_GATE_RMS × this (absolute floor for a hit)
 CLASSIC_PEAK_AVG_COEF  = float(os.environ.get("CLASSIC_PEAK_AVG_COEF", "0.98").strip() or "0.98")  # smoothing of the moving peak reference (~1s)
+# Onset gate on FIRING (not just calibration): a classic trigger only counts on a
+# distinct in-band transient (the same peak > moving-avg × ratio + rising + above-floor
+# test). This rejects false triggers when there's no real hit in the band and low-level
+# content just gets multiplied up over the threshold — only kick/snare-like attacks fire.
+# The onset "opens a window" for a few blocks so the (smoothed) meter's threshold
+# crossing still counts. CLASSIC_ONSET_GATE=0 disables it (pure level trigger).
+CLASSIC_ONSET_GATE        = os.environ.get("CLASSIC_ONSET_GATE", "1").strip() != "0"
+CLASSIC_ONSET_HOLD_BLOCKS = int(os.environ.get("CLASSIC_ONSET_HOLD_BLOCKS", "3").strip() or "3")  # ~64ms window after an attack
+# Firing gate uses a SHARP relative-rise test (this fraction of the peak in one block)
+# rather than the baseline-ratio hit test — a slope test needs no history/seed, so it
+# never suppresses the first hits of a session, while still rejecting steady content
+# (≈0 slope) and slow swells (tiny slope). Lower catches softer kicks; raise to be stricter.
+CLASSIC_ATTACK_SLOPE_FRAC = float(os.environ.get("CLASSIC_ATTACK_SLOPE_FRAC", "0.35").strip() or "0.35")
 _agc_frozen = False
 _agc_calib_center = None   # band center the current gain was calibrated for
 _agc_calib_q = None        # band Q the current gain was calibrated for
@@ -591,6 +625,8 @@ _classic_peak_avg = 0.0    # slow moving reference of the band-env peak (onset t
 _classic_prev_peak = 0.0   # previous block's band-env peak (rising-edge test)
 _classic_calib_hits = 0    # in-band transient hits counted toward calibration
 _classic_calib_sum = 0.0   # running sum of hit levels (direct gain calibration)
+_classic_onset_hold = 0    # blocks remaining in the "onset window" (firing gate)
+_classic_onset_ok = True   # is firing currently allowed by the onset gate
 
 # "manual" detect mode: no AGC, no normalization. The band-envelope PEAK is mapped
 # through a FIXED dBFS window [MANUAL_FLOOR_DB, MANUAL_CEIL_DB] -> 0..1 meter, so a
@@ -919,6 +955,13 @@ FFT_SPECTRAL_FLOOR = float(os.environ.get("FFT_SPECTRAL_FLOOR", "0"))  # After a
 FFT_DB_FLOOR = float(os.environ.get("FFT_DB_FLOOR", "-72"))
 FFT_DB_CEIL = float(os.environ.get("FFT_DB_CEIL", "-8"))
 _FFT_DB_SPAN = max(1.0, FFT_DB_CEIL - FFT_DB_FLOOR)
+# FFT spectrum DISPLAY gain — visual only. A hotter input fills in / lifts the
+# spectrum bars (looks better) but also pins the beat detector, so we keep the
+# detector's INPUT_GAIN modest and boost ONLY the signal fed to the FFT here.
+# ~+15 dB matches how the spectrum looked with the input knob cranked, without
+# hotting detection. Applied to a separate copy; the detector's signal is untouched.
+FFT_VISUAL_GAIN_DB = float(os.environ.get("FFT_VISUAL_GAIN_DB", "15").strip() or "15")
+_FFT_VISUAL_GAIN_LIN = 10.0 ** (FFT_VISUAL_GAIN_DB / 20.0)
 FFT_FLUX_DEADZONE = float(os.environ.get("FFT_FLUX_DEADZONE", "0"))  # 0 = raw spectral flux
 FFT_HYBRID_MIN_LEVEL = float(os.environ.get("FFT_HYBRID_MIN_LEVEL", "0.07"))  # Hybrid detect mode only
 # Dashed horizontal threshold ruler inside the FFT Q band (visual only). Default off — env meter shows level vs thresh.
@@ -2050,38 +2093,52 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
         lbe = min(1.0, float(classic_abs_ema) / denom)
         return lbe, lbe
 
-    # AGC: auto-calibrate then hold, calibrated ONLY off transient PEAKS in the band.
-    # (Only reaches here on signal-present blocks; silence returns early above.)
-    # Onset test: the block's band-envelope PEAK must spike above its own slow moving
-    # average AND clear an absolute floor. Sustained / out-of-band content that lacks
-    # in-band transients (strings, pad, drone, a kick-less bassline) fails this test,
-    # so it can never set the calibration gain — the classic failure the user hit.
+    # --- Transient / onset test on the band-envelope PEAK (all gain modes) ---
+    # A "hit" is a genuine attack: band-env peak (a) above an absolute floor,
+    # (b) well above its own slow moving average, (c) rising vs the previous block.
+    # (c) rejects sustained content (a drone's peak ~= its average and doesn't keep
+    # rising) and collapses a multi-block kick into one hit on its attack. The average
+    # is seeded to the first peak so steady content reads ratio ~1 (not a spike during
+    # a ramp from zero). This drives BOTH the peak-gated calibration AND the firing
+    # gate, so low-level/boosted content with no real attack can't trigger.
     global _agc_frozen, _agc_calib_center, _agc_calib_q
     global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
+    global _classic_onset_hold, _classic_onset_ok
     e_peak = float(np.max(e_env)) if len(e_env) else 0.0
-    # A hit is a genuine transient ATTACK in the band: peak is (a) above an absolute
-    # floor, (b) well above its own slow moving average, and (c) rising vs the previous
-    # block. (c) rejects sustained content (a drone's peak ~= its average and doesn't
-    # keep rising) and also collapses a multi-block kick into a single hit on its attack.
-    # Seed the average to the first peak so steady content reads ratio ~1 (not a spike
-    # during the average's ramp from zero).
     if _classic_peak_avg <= 0.0:
         _classic_peak_avg = e_peak
     else:
         _classic_peak_avg = CLASSIC_PEAK_AVG_COEF * _classic_peak_avg + (1.0 - CLASSIC_PEAK_AVG_COEF) * e_peak
-    is_hit = (e_peak > NOISE_GATE_RMS * CLASSIC_ONSET_MIN_MULT) and \
-             (e_peak > _classic_peak_avg * CLASSIC_ONSET_RATIO) and \
-             (e_peak > _classic_prev_peak)
+    above_floor = e_peak > NOISE_GATE_RMS * CLASSIC_ONSET_MIN_MULT
+    # Calibration hit (used only in calibrate mode): peak pops above its slow baseline.
+    is_hit = above_floor and (e_peak > _classic_peak_avg * CLASSIC_ONSET_RATIO) and (e_peak > _classic_prev_peak)
+    # Firing attack: a SHARP relative rise this block — independent of the seeded
+    # baseline, so it never suppresses early hits, and steady/slowly-swelling content
+    # (≈0 slope) is rejected. This is what makes only kick/snare-like attacks fire.
+    is_attack = above_floor and ((e_peak - _classic_prev_peak) > e_peak * CLASSIC_ATTACK_SLOPE_FRAC)
     _classic_prev_peak = e_peak
+    # An attack opens a short window (the smoothed meter may cross the threshold a block
+    # or two after the raw attack, so don't require exact alignment).
+    if is_attack:
+        _classic_onset_hold = CLASSIC_ONSET_HOLD_BLOCKS
+    _classic_onset_ok = (not CLASSIC_ONSET_GATE) or (_classic_onset_hold > 0)
+    if _classic_onset_hold > 0:
+        _classic_onset_hold -= 1
 
+    # Gain that scales the band envelope so hits are well-defined on the meter.
     if not AGC_ON:
         g_agc = 1.0
-    elif AGC_CALIBRATE_HITS <= 0:
-        # Freezing disabled: classic continuous AGC.
+    elif AGC_GAIN_MODE == "fixed":
+        # Constant boost: identical every run, nothing to auto-detect. Consistent by
+        # construction — a threshold set once always means the same thing.
+        g_agc = AGC_FIXED_GAIN
+    elif AGC_GAIN_MODE == "continuous" or AGC_CALIBRATE_HITS <= 0:
+        # Always-adapting AGC (levels/pumps over time).
         g_agc = agc_obj.update(e_mean_raw)
     else:
-        # Re-calibrate if the targeted band moved — the frozen gain was tuned for the
-        # old band's energy and would misread a new Freq/Q selection.
+        # "calibrate": auto-calibrate then hold, calibrated ONLY off the transient hits
+        # detected above. Sustained/out-of-band content can't set the gain — it waits.
+        # Re-calibrate if the targeted band moved (old gain was for a different band).
         if _agc_calib_center != band.center or _agc_calib_q != band.q:
             _agc_calib_center = band.center
             _agc_calib_q = band.q
@@ -2091,8 +2148,7 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
         if _agc_frozen:
             g_agc = agc_obj.gain              # hold the calibrated gain — consistent per hit
         elif is_hit:
-            # Calibrate directly off the hits: set gain so the average hit level maps
-            # to AGC_TARGET. Converges immediately and only ever sees real in-band peaks.
+            # Set gain so the average hit level maps to AGC_TARGET; only ever sees peaks.
             _classic_calib_hits += 1
             _classic_calib_sum += e_mean_raw
             avg_hit = _classic_calib_sum / _classic_calib_hits
@@ -2358,6 +2414,7 @@ def _reset_trigger_state():
     global _manual_meter
     global _agc_frozen, _agc_calib_center, _agc_calib_q
     global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
+    global _classic_onset_hold, _classic_onset_ok
     _manual_meter = 0.0
     # Re-run AGC peak-calibration and drop the held gain back to unity.
     _agc_frozen = False
@@ -2367,6 +2424,8 @@ def _reset_trigger_state():
     _classic_prev_peak = 0.0
     _classic_calib_hits = 0
     _classic_calib_sum = 0.0
+    _classic_onset_hold = 0
+    _classic_onset_ok = True
     try:
         agc.gain = 1.0
     except NameError:
@@ -3899,7 +3958,7 @@ def audio_loop():
     global classic_abs_ema
 
     bp   = BiquadBandpass(SR, band.center, band.q)
-    envd = EnvDetector(SR, attack_ms=8.0, release_ms=80.0)
+    envd = EnvDetector(SR, attack_ms=CLASSIC_ATTACK_MS, release_ms=CLASSIC_RELEASE_MS)
     classic_abs_ema = 0.0
 
     # Initialize 3-band onset detector
@@ -3959,6 +4018,7 @@ def audio_loop():
         global _fft_hp_y, _fft_hp_x_prev
         global _fft_low_smooth
         global classic_abs_ema
+        global _classic_onset_ok
 
         # Mono vs stereo — channel selectable via AUDIO_INPUT_CHANNEL (see module constant)
         if indata.shape[1] >= 2:
@@ -4001,7 +4061,9 @@ def audio_loop():
         if _HANNING_WINDOW is None or len(_HANNING_WINDOW) != len(x):
             _HANNING_WINDOW = np.hanning(len(x)).astype(np.float32)
         padded = np.zeros(FFT_SIZE, dtype=np.float32)
-        padded[:len(x)] = x * _HANNING_WINDOW
+        # Visual-only boost: fed to the FFT/spectrum only. The detector consumes the
+        # unmodified `x` below, so this fills in the display without hotting detection.
+        padded[:len(x)] = (x * _FFT_VISUAL_GAIN_LIN) * _HANNING_WINDOW
         fft = np.fft.rfft(padded)
         fft_mag = np.abs(fft) / len(x)  # Normalize by original length
         
@@ -4187,6 +4249,10 @@ def audio_loop():
             normalized_q = (raw_q_level - _q_band_recent_min) / q_range
             display_mean_in_q = min(1.0, max(0.0, normalized_q))
 
+        # Onset firing gate defaults open; only the classic detector narrows it (below),
+        # so other trigger families are unaffected.
+        _classic_onset_ok = True
+
         # Top-level analysis mode selects the trigger family. Controls (Freq/Q/Thresh/
         # Release/Brightness) feed all families identically; only the detection differs.
         if ANALYSIS_MODE_INDEX == 1:
@@ -4269,7 +4335,9 @@ def audio_loop():
             _effective_thresh = three_band_detector.get_adaptive_threshold(THREEBAND_SELECTED)
         else:
             _effective_thresh = effective_thresh
-            should_trigger = above and not was_above and can_fire
+            # ...and only on a distinct in-band transient (classic onset gate; open for
+            # other modes). Rejects false triggers from boosted low-level/no-signal content.
+            should_trigger = above and not was_above and can_fire and _classic_onset_ok
 
         if should_trigger and active_prog in (1, 2, 3, 4, 5):
             # Calculate time since last trigger for speed multiplier
