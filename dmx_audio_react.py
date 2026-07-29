@@ -131,24 +131,35 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dmx_con
 # is defined further down). load_defaults_mode() populates this.
 _LOADED_ANALYSIS_MODE = 0
 
+# AGC on/off loaded from config (applied to AGC_ON once that constant is defined further
+# down). None = no persisted value; keep the built-in default. load_defaults_mode() sets it.
+_LOADED_AGC_ON = None
+
 # Input gain applied to audio (absolute dB). UI shows relative dB with 0 = INPUT_GAIN_REF_DB.
 # IMPORTANT: INPUT_GAIN_REF_DB anchors the visual "0 dB" in Settings. It does NOT
 # change the actual gain applied — it only shifts where the UI's "0 dB" sits — so
 # we can calibrate the operating point to show 0 dB without altering the signal.
-# Calibrated to -2 dB absolute: the earlier +6 dB anchor ran the input hot, which
-# slammed the band-envelope meter to full and made the beat read "always on" (a hot
-# input feeds straight into the detector's envelope). ~-2 dB absolute keeps hits
-# well-defined without pinning. Anchoring the reference here makes that good level
-# read as 0 dB in the UI, and the default boots exactly at that 0 dB anchor.
-INPUT_GAIN_REF_DB = -2   # 0 dB display = -2 dB absolute (measured good operating point)
+# Calibrated to +18 dB absolute: the ADC input level dropped (~20 dB quieter than the
+# earlier -2 dB operating point), so the band-envelope/FFT read light until ~+20 dB was
+# dialled in. +18 dB absolute restores well-defined hits without pinning. Anchoring the
+# reference here makes that good level read as 0 dB in the UI, and the default boots
+# exactly at that 0 dB anchor. (Earlier history: a +6 dB anchor ran the input hot and
+# pinned the meter "always on"; -2 dB was the good point before the input level dropped.)
+INPUT_GAIN_REF_DB = 18   # 0 dB display = +18 dB absolute (measured good operating point)
 INPUT_GAIN_MIN_DB = INPUT_GAIN_REF_DB - 24  # absolute floor (display: -24 dB)
 INPUT_GAIN_MAX_DB = INPUT_GAIN_REF_DB + 24  # absolute ceiling (display: +24 dB)
 INPUT_GAIN_DB = INPUT_GAIN_REF_DB  # default boots at the 0 dB anchor (the calibrated good level)
+# Fixed extra boost applied to the audio ON TOP of INPUT_GAIN_DB, transparent to the Settings UI:
+# the displayed dB (and its 0 dB anchor) are unchanged, but the whole chain runs this much hotter.
+# Use this to raise the overall operating level without moving the UI's 0 dB. (Persistence stores
+# INPUT_GAIN_DB as an absolute value, so nudging INPUT_GAIN_REF_DB would shift the shown number;
+# this extra term keeps the display fixed and just makes everything +N dB.)
+INPUT_GAIN_EXTRA_DB = float(os.environ.get("INPUT_GAIN_EXTRA_DB", "5").strip() or "5")
 
 def load_defaults_mode():
     """Load defaults mode, DMX output mode, channel count, input gain, and any custom preset values from config."""
     global DEFAULTS_PRESETS, DMX_OUTPUT_MODE, DMX_CHANNEL_COUNT, INPUT_GAIN_DB
-    global _LOADED_ANALYSIS_MODE
+    global _LOADED_ANALYSIS_MODE, _LOADED_AGC_ON
     mode_idx = 0
     try:
         if os.path.exists(CONFIG_FILE):
@@ -184,6 +195,11 @@ def load_defaults_mode():
                                 _LOADED_ANALYSIS_MODE = am
                         except ValueError:
                             pass
+                    elif line.startswith("agc_on="):
+                        try:
+                            _LOADED_AGC_ON = (int(line.split("=")[1]) != 0)
+                        except ValueError:
+                            pass
                     elif "=" in line:
                         # Parse preset override: LOW=120.0,0.40,542.0,2.0,0,0
                         key, val = line.split("=", 1)
@@ -211,6 +227,8 @@ def save_defaults_mode(idx):
         channel_count = DMX_CHANNEL_COUNT
         input_gain = INPUT_GAIN_DB
         detect_line = None
+        analysis_line = None
+        agc_line = None
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 for line in f:
@@ -231,6 +249,8 @@ def save_defaults_mode(idx):
                         detect_line = line
                     elif line.startswith("analysis_mode="):
                         analysis_line = line
+                    elif line.startswith("agc_on="):
+                        agc_line = line
                     elif "=" in line and not line.startswith("defaults_mode="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -245,6 +265,8 @@ def save_defaults_mode(idx):
                 f.write(f"{detect_line}\n")
             if analysis_line:
                 f.write(f"{analysis_line}\n")
+            if agc_line:
+                f.write(f"{agc_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -260,6 +282,7 @@ def save_dmx_output_mode(mode_idx):
         input_gain = INPUT_GAIN_DB
         detect_line = None
         analysis_line = None
+        agc_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -281,6 +304,8 @@ def save_dmx_output_mode(mode_idx):
                         detect_line = line
                     elif line.startswith("analysis_mode="):
                         analysis_line = line
+                    elif line.startswith("agc_on="):
+                        agc_line = line
                     elif "=" in line and not line.startswith("dmx_output_mode="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -295,6 +320,8 @@ def save_dmx_output_mode(mode_idx):
                 f.write(f"{detect_line}\n")
             if analysis_line:
                 f.write(f"{analysis_line}\n")
+            if agc_line:
+                f.write(f"{agc_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -309,6 +336,7 @@ def save_dmx_channel_count(count):
         input_gain = INPUT_GAIN_DB
         detect_line = None
         analysis_line = None
+        agc_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -327,6 +355,8 @@ def save_dmx_channel_count(count):
                         detect_line = line
                     elif line.startswith("analysis_mode="):
                         analysis_line = line
+                    elif line.startswith("agc_on="):
+                        agc_line = line
                     elif "=" in line and not line.startswith("dmx_channel_count="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -341,6 +371,8 @@ def save_dmx_channel_count(count):
                 f.write(f"{detect_line}\n")
             if analysis_line:
                 f.write(f"{analysis_line}\n")
+            if agc_line:
+                f.write(f"{agc_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -353,6 +385,110 @@ def save_input_gain(gain_db):
         defaults_mode = "LOW"
         output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
         channel_count = DMX_CHANNEL_COUNT
+        detect_line = None
+        analysis_line = None
+        agc_line = None
+        preset_overrides = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("defaults_mode="):
+                        defaults_mode = line.split("=")[1]
+                    elif line.startswith("dmx_output_mode="):
+                        output_mode = line.split("=")[1]
+                    elif line.startswith("dmx_channel_count="):
+                        try:
+                            channel_count = int(line.split("=")[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith("detect_mode_index="):
+                        detect_line = line
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
+                    elif line.startswith("agc_on="):
+                        agc_line = line
+                    elif "=" in line and not line.startswith("input_gain_db="):
+                        key, val = line.split("=", 1)
+                        if key in DEFAULTS_PRESETS:
+                            preset_overrides[key] = val
+        # Write back with updated input gain
+        with open(CONFIG_FILE, 'w') as f:
+            f.write(f"defaults_mode={defaults_mode}\n")
+            f.write(f"dmx_output_mode={output_mode}\n")
+            f.write(f"dmx_channel_count={channel_count}\n")
+            f.write(f"input_gain_db={gain_db}\n")
+            if detect_line:
+                f.write(f"{detect_line}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
+            if agc_line:
+                f.write(f"{agc_line}\n")
+            for key, val in preset_overrides.items():
+                f.write(f"{key}={val}\n")
+    except Exception:
+        pass
+
+def save_analysis_mode(idx):
+    """Save the top-level analysis mode index (0=Normal,1=Band,2=3-Band), preserving others."""
+    try:
+        # Read existing config (everything except analysis_mode is preserved verbatim)
+        defaults_mode = "LOW"
+        output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
+        channel_count = DMX_CHANNEL_COUNT
+        input_gain = INPUT_GAIN_DB
+        detect_line = None
+        agc_line = None
+        preset_overrides = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("defaults_mode="):
+                        defaults_mode = line.split("=")[1]
+                    elif line.startswith("dmx_output_mode="):
+                        output_mode = line.split("=")[1]
+                    elif line.startswith("dmx_channel_count="):
+                        try:
+                            channel_count = int(line.split("=")[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith("input_gain_db="):
+                        try:
+                            input_gain = int(line.split("=")[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith("detect_mode_index="):
+                        detect_line = line
+                    elif line.startswith("agc_on="):
+                        agc_line = line
+                    elif "=" in line and not line.startswith("analysis_mode="):
+                        key, val = line.split("=", 1)
+                        if key in DEFAULTS_PRESETS:
+                            preset_overrides[key] = val
+        # Write back with updated analysis mode
+        with open(CONFIG_FILE, 'w') as f:
+            f.write(f"defaults_mode={defaults_mode}\n")
+            f.write(f"dmx_output_mode={output_mode}\n")
+            f.write(f"dmx_channel_count={channel_count}\n")
+            f.write(f"input_gain_db={input_gain}\n")
+            if detect_line:
+                f.write(f"{detect_line}\n")
+            if agc_line:
+                f.write(f"{agc_line}\n")
+            f.write(f"analysis_mode={int(idx)}\n")
+            for key, val in preset_overrides.items():
+                f.write(f"{key}={val}\n")
+    except Exception:
+        pass
+
+def save_agc_on(state):
+    """Save the AGC on/off flag (Setup > AGC) to config file, preserving other settings."""
+    try:
+        defaults_mode = "LOW"
+        output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
+        channel_count = DMX_CHANNEL_COUNT
+        input_gain = INPUT_GAIN_DB
         detect_line = None
         analysis_line = None
         preset_overrides = {}
@@ -369,52 +505,6 @@ def save_input_gain(gain_db):
                             channel_count = int(line.split("=")[1])
                         except ValueError:
                             pass
-                    elif line.startswith("detect_mode_index="):
-                        detect_line = line
-                    elif line.startswith("analysis_mode="):
-                        analysis_line = line
-                    elif "=" in line and not line.startswith("input_gain_db="):
-                        key, val = line.split("=", 1)
-                        if key in DEFAULTS_PRESETS:
-                            preset_overrides[key] = val
-        # Write back with updated input gain
-        with open(CONFIG_FILE, 'w') as f:
-            f.write(f"defaults_mode={defaults_mode}\n")
-            f.write(f"dmx_output_mode={output_mode}\n")
-            f.write(f"dmx_channel_count={channel_count}\n")
-            f.write(f"input_gain_db={gain_db}\n")
-            if detect_line:
-                f.write(f"{detect_line}\n")
-            if analysis_line:
-                f.write(f"{analysis_line}\n")
-            for key, val in preset_overrides.items():
-                f.write(f"{key}={val}\n")
-    except Exception:
-        pass
-
-def save_analysis_mode(idx):
-    """Save the top-level analysis mode index (0=Normal,1=Band,2=3-Band), preserving others."""
-    try:
-        # Read existing config (everything except analysis_mode is preserved verbatim)
-        defaults_mode = "LOW"
-        output_mode = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
-        channel_count = DMX_CHANNEL_COUNT
-        input_gain = INPUT_GAIN_DB
-        detect_line = None
-        preset_overrides = {}
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("defaults_mode="):
-                        defaults_mode = line.split("=")[1]
-                    elif line.startswith("dmx_output_mode="):
-                        output_mode = line.split("=")[1]
-                    elif line.startswith("dmx_channel_count="):
-                        try:
-                            channel_count = int(line.split("=")[1])
-                        except ValueError:
-                            pass
                     elif line.startswith("input_gain_db="):
                         try:
                             input_gain = int(line.split("=")[1])
@@ -422,11 +512,13 @@ def save_analysis_mode(idx):
                             pass
                     elif line.startswith("detect_mode_index="):
                         detect_line = line
-                    elif "=" in line and not line.startswith("analysis_mode="):
+                    elif line.startswith("analysis_mode="):
+                        analysis_line = line
+                    elif "=" in line and not line.startswith("agc_on="):
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
                             preset_overrides[key] = val
-        # Write back with updated analysis mode
+        # Write back with updated AGC flag
         with open(CONFIG_FILE, 'w') as f:
             f.write(f"defaults_mode={defaults_mode}\n")
             f.write(f"dmx_output_mode={output_mode}\n")
@@ -434,7 +526,9 @@ def save_analysis_mode(idx):
             f.write(f"input_gain_db={input_gain}\n")
             if detect_line:
                 f.write(f"{detect_line}\n")
-            f.write(f"analysis_mode={int(idx)}\n")
+            if analysis_line:
+                f.write(f"{analysis_line}\n")
+            f.write(f"agc_on={1 if state else 0}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -450,6 +544,7 @@ def save_preset_values(mode_name, center_hz, thresh, decay_ms, q, thresh_mode, r
         input_gain = INPUT_GAIN_DB
         detect_line = None
         analysis_line = None
+        agc_line = None
         preset_overrides = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -473,6 +568,8 @@ def save_preset_values(mode_name, center_hz, thresh, decay_ms, q, thresh_mode, r
                         detect_line = line
                     elif line.startswith("analysis_mode="):
                         analysis_line = line
+                    elif line.startswith("agc_on="):
+                        agc_line = line
                     elif "=" in line:
                         key, val = line.split("=", 1)
                         if key in DEFAULTS_PRESETS:
@@ -489,6 +586,8 @@ def save_preset_values(mode_name, center_hz, thresh, decay_ms, q, thresh_mode, r
                 f.write(f"{detect_line}\n")
             if analysis_line:
                 f.write(f"{analysis_line}\n")
+            if agc_line:
+                f.write(f"{agc_line}\n")
             for key, val in preset_overrides.items():
                 f.write(f"{key}={val}\n")
     except Exception:
@@ -551,6 +650,9 @@ _audio_q_depth_max = 0
 # Detection / logic
 ENV_EMA       = 0.55   # Restored old-project value; smooth envelope without chatter
 AGC_ON        = True
+# Apply the persisted AGC on/off choice (Setup > AGC). load_defaults_mode() ran above.
+if _LOADED_AGC_ON is not None:
+    AGC_ON = _LOADED_AGC_ON
 AGC_TARGET    = 0.020
 # Classic band-envelope follower times. RELEASE is how fast the meter falls back
 # after a hit — the "recoil". Too slow (old 80ms) + a fixed gain that slams the
@@ -570,21 +672,44 @@ CLASSIC_UI_SCALE = float(os.environ.get("CLASSIC_UI_SCALE", "3.0"))
 # floor, freeze AGC (don't let it pump noise up toward target) and decay the displayed
 # envelope toward zero. ~0.0008 ≈ -62 dBFS; tune for your input chain.
 NOISE_GATE_RMS = float(os.environ.get("NOISE_GATE_RMS", "0.0008"))
-# Cap the AGC's maximum gain (was 20×). 8× ≈ +18 dB still amplifies quiet music,
-# but won't pump silence to full scale.
-AGC_MAX_GAIN = float(os.environ.get("AGC_MAX_GAIN", "8.0"))
+# Cap the AGC's maximum gain. The calibrate path uses this as the ceiling when lifting
+# a band's transient peaks to the meter's operating level; quiet HIGH bands (hats) need
+# much more gain than a loud low band (kick), so this is generous (~+28 dB). The silence
+# gate + transient firing gate keep the extra headroom from pumping room noise to full.
+AGC_MAX_GAIN = float(os.environ.get("AGC_MAX_GAIN", "24.0"))
 
 # How the classic detector's gain (the multiplier that scales the band envelope so
 # hits are well-defined on the meter) is chosen. AGC_GAIN_MODE:
-#   "fixed"      (DEFAULT): apply a constant AGC_FIXED_GAIN every block. Same boost
-#                every run, nothing to auto-detect, so a threshold set once always
-#                means the same thing. Tune AGC_FIXED_GAIN up/down so hits sit where
-#                you want on the meter — that's the only knob.
-#   "calibrate": peak-gated auto-calibrate-then-hold (see AGC_CALIBRATE_HITS below).
+#   "scaled"     (DEFAULT): a FIXED, deterministic gain that rises with band center along a
+#                fixed frequency curve (see FREQ_GAIN_* below). It compensates for music's
+#                spectral tilt — highs carry less energy than lows — so a snare (mids) or hats
+#                (highs) get a bigger boost than a kick (lows) WITHOUT any auto-detection.
+#                Same every run; it can't lock onto the wrong reference the way "calibrate"
+#                can (e.g. calibrating the lows during a kick-less section, or the mids with
+#                no clap, then being wrong all session). Tune with FREQ_GAIN_SLOPE.
+#   "calibrate": transient-gated auto-calibrate-then-hold (see AGC_CALIBRATE_HITS). Locks the
+#                per-band gain off real in-band hits and re-locks on Freq/Q change. Reads
+#                accurately once locked, but only if the section it locks on actually contains
+#                the target transient — hence "scaled" is the safer default.
+#   "fixed":     one constant AGC_FIXED_GAIN at every frequency (band-INDEPENDENT); a threshold
+#                tuned on kicks won't transfer to quieter high bands. Tune AGC_FIXED_GAIN.
 #   "continuous": always-adapting AGC (original behavior; levels/pumps over time).
 # AGC_ON=0 disables the boost entirely (gain = 1.0).
-AGC_GAIN_MODE  = os.environ.get("AGC_GAIN_MODE", "fixed").strip().lower()
+AGC_GAIN_MODE  = os.environ.get("AGC_GAIN_MODE", "scaled").strip().lower()
 AGC_FIXED_GAIN = float(os.environ.get("AGC_FIXED_GAIN", "3.0").strip() or "3.0")
+
+# "scaled" gain curve: g(center) = AGC_FIXED_GAIN × (center / FREQ_GAIN_REF_HZ) ** FREQ_GAIN_SLOPE,
+# clamped to [FREQ_GAIN_MIN, AGC_MAX_GAIN]. This is a static per-frequency boost — no signal
+# analysis, no locking, identical every run.
+#   FREQ_GAIN_REF_HZ: the center where the gain equals AGC_FIXED_GAIN (the anchor). Default 120 Hz
+#     so the low/kick band behaves exactly like the old constant-gain "fixed" mode you tuned.
+#   FREQ_GAIN_SLOPE:  power-law exponent = the tilt. 0.5 ≈ pink-noise spectrum (+3 dB/oct of boost
+#     as frequency rises), which fits typical program material. Raise it to push highs harder,
+#     lower it toward 0 to flatten back toward a constant gain. THE main knob for this mode.
+#   FREQ_GAIN_MIN:    floor so bands below the anchor never drop to a useless gain.
+FREQ_GAIN_REF_HZ = float(os.environ.get("FREQ_GAIN_REF_HZ", "120").strip() or "120")
+FREQ_GAIN_SLOPE  = float(os.environ.get("FREQ_GAIN_SLOPE", "0.5").strip() or "0.5")
+FREQ_GAIN_MIN    = float(os.environ.get("FREQ_GAIN_MIN", "0.5").strip() or "0.5")
 
 # AGC "auto-calibrate, then hold" (only used when AGC_GAIN_MODE=calibrate): adapts during a short window of
 # signal-present blocks, then FREEZES its gain, so a given hit always reads the
@@ -605,28 +730,65 @@ AGC_CALIBRATE_HITS     = int(os.environ.get("AGC_CALIBRATE_HITS", "8").strip() o
 CLASSIC_ONSET_RATIO    = float(os.environ.get("CLASSIC_ONSET_RATIO", "1.6").strip() or "1.6")     # peak must exceed this × its moving avg to count as a hit
 CLASSIC_ONSET_MIN_MULT = float(os.environ.get("CLASSIC_ONSET_MIN_MULT", "3.0").strip() or "3.0")  # …and exceed NOISE_GATE_RMS × this (absolute floor for a hit)
 CLASSIC_PEAK_AVG_COEF  = float(os.environ.get("CLASSIC_PEAK_AVG_COEF", "0.98").strip() or "0.98")  # smoothing of the moving peak reference (~1s)
-# Onset gate on FIRING (not just calibration): a classic trigger only counts on a
-# distinct in-band transient (the same peak > moving-avg × ratio + rising + above-floor
-# test). This rejects false triggers when there's no real hit in the band and low-level
-# content just gets multiplied up over the threshold — only kick/snare-like attacks fire.
-# The onset "opens a window" for a few blocks so the (smoothed) meter's threshold
-# crossing still counts. CLASSIC_ONSET_GATE=0 disables it (pure level trigger).
-CLASSIC_ONSET_GATE        = os.environ.get("CLASSIC_ONSET_GATE", "1").strip() != "0"
+# Onset gate on FIRING (not just calibration): when ON, a classic trigger ALSO requires a
+# distinct in-band transient (a sharp relative rise) at the moment the meter crosses the
+# threshold — not just the crossing itself. In theory this rejects level-only false triggers;
+# in practice it was SILENTLY DROPPING real kicks whose attack was spread across blocks or
+# whose envelope was already high, making the kick "not always trigger" even though the bar
+# clearly crossed. DEFAULT OFF so AGC-on fires purely on the (calibrated) meter crossing the
+# threshold — the same trigger logic as AGC-off, so what you see on the bar is what fires.
+# The rising-edge detect + REFRACTORY_MS already prevent double-hits. Re-enable the stricter
+# transient requirement with CLASSIC_ONSET_GATE=1 if level-only content misfires.
+CLASSIC_ONSET_GATE        = os.environ.get("CLASSIC_ONSET_GATE", "0").strip() != "0"
 CLASSIC_ONSET_HOLD_BLOCKS = int(os.environ.get("CLASSIC_ONSET_HOLD_BLOCKS", "3").strip() or "3")  # ~64ms window after an attack
 # Firing gate uses a SHARP relative-rise test (this fraction of the peak in one block)
 # rather than the baseline-ratio hit test — a slope test needs no history/seed, so it
 # never suppresses the first hits of a session, while still rejecting steady content
 # (≈0 slope) and slow swells (tiny slope). Lower catches softer kicks; raise to be stricter.
 CLASSIC_ATTACK_SLOPE_FRAC = float(os.environ.get("CLASSIC_ATTACK_SLOPE_FRAC", "0.35").strip() or "0.35")
+
+# --- Band-agnostic classic detector -------------------------------------------------
+# Everything above was tuned around the low-end kick. These knobs let the SAME detector
+# lock onto whatever transient lives in the selected band (snare in the mids, hats in the
+# highs) by making the "is this a hit?" test RELATIVE to the band's own energy rather than
+# an absolute, kick-sized floor.
+#
+# CLASSIC_ADAPTIVE_ENV: re-time the envelope follower from get_envelope_times(center) as the
+#   Freq encoder moves — fast attack/release for hats, slower for kicks (see that function).
+CLASSIC_ADAPTIVE_ENV = os.environ.get("CLASSIC_ADAPTIVE_ENV", "1").strip() != "0"
+# Learned per-band ambient floor of the band envelope. Updated (EMA) only on steady/decaying
+# frames so transients don't drag it up — mirrors the kick detector's "learn the floor when
+# nothing is hitting". ~0.995 ≈ a few seconds of memory at 48k/1024.
+CLASSIC_FLOOR_DECAY   = float(os.environ.get("CLASSIC_FLOOR_DECAY", "0.995").strip() or "0.995")
+# Absolute backstop for the RELATIVE hit floor: a hit must clear max(this, learned_floor×MULT).
+# Low enough that quiet hats still register, high enough that residual noise past the silence
+# gate can't. This replaces the old absolute-only NOISE_GATE_RMS×MULT hit floor.
+CLASSIC_HIT_FLOOR_ABS = float(os.environ.get("CLASSIC_HIT_FLOOR_ABS", "0.0004").strip() or "0.0004")
+# Calibrate-then-hold sets the per-band gain so the average transient hit lands at this
+# METER level (0..1) — measured from the realized meter, so a sharp hat and a broad kick
+# both lock to the same reading and a single threshold works across bands. 0.9 leaves a
+# little headroom for louder-than-average hits to push toward 1.0. (The old calibrate keyed
+# on the hit mean and targeted AGC_TARGET, ≈3× below the meter — that's why it "read light".)
+CLASSIC_CALIB_HEADROOM = float(os.environ.get("CLASSIC_CALIB_HEADROOM", "0.9").strip() or "0.9")
+# Floor subtraction: the meter reads the envelope ABOVE the learned floor (× this margin), not
+# the absolute level. Without it, a high-gain band (highs, where the "scaled" curve boosts most)
+# amplifies its own noise floor enough to keep the meter above threshold, so it never re-arms
+# and fires only once. Subtracting ~1.5× the floor drops steady noise to ~0 on the meter while
+# leaving real transients (well above the floor) intact. Set 0 to disable (absolute meter).
+CLASSIC_FLOOR_SUBTRACT = float(os.environ.get("CLASSIC_FLOOR_SUBTRACT", "1.5").strip() or "1.5")
+
 _agc_frozen = False
 _agc_calib_center = None   # band center the current gain was calibrated for
 _agc_calib_q = None        # band Q the current gain was calibrated for
 _classic_peak_avg = 0.0    # slow moving reference of the band-env peak (onset test)
 _classic_prev_peak = 0.0   # previous block's band-env peak (rising-edge test)
 _classic_calib_hits = 0    # in-band transient hits counted toward calibration
-_classic_calib_sum = 0.0   # running sum of hit levels (direct gain calibration)
+_classic_calib_sum = 0.0   # running sum of per-hit candidate gains (averaged into the locked gain)
 _classic_onset_hold = 0    # blocks remaining in the "onset window" (firing gate)
 _classic_onset_ok = True   # is firing currently allowed by the onset gate
+_classic_floor = 0.001     # learned per-band ambient floor of the band envelope
+_classic_floor_key = None  # (center, q) the floor/peak-avg were learned for (reset on change)
+_classic_env_times = None  # cached (attack_ms, release_ms) so envelope is re-set only on change
 
 # "manual" detect mode: no AGC, no normalization. The band-envelope PEAK is mapped
 # through a FIXED dBFS window [MANUAL_FLOOR_DB, MANUAL_CEIL_DB] -> 0..1 meter, so a
@@ -764,15 +926,17 @@ BEAT_DETECT_METHOD = 0
 #   "3-Band" : fixed LOW/MID/HIGH bands (spectral-flux onset); Freq encoder selects the band.
 ANALYSIS_MODES = ["Normal", "Band", "3-Band"]
 ANALYSIS_MODE_SHORT = ["STD", "BND", "3BD"]  # compact labels for the OLED
-# LOCKED to Normal for now — the Band / 3-Band modes are hidden (code kept, just unreachable).
-# To re-enable: restore `ANALYSIS_MODE_INDEX = _LOADED_ANALYSIS_MODE` and the reset+extra combo below.
-ANALYSIS_MODE_INDEX = 0
+# Boot into the last-used analysis mode (persisted in CONFIG_FILE via save_analysis_mode()).
+# Constrained to the two user-facing modes: Classic (0) and 3-Band (2). The hidden "Band"
+# mode (1) is coerced to Classic. load_defaults_mode() runs earlier, so _LOADED_ANALYSIS_MODE
+# is already populated here. Mode is selected from the Setup submenu tab's "Analysis" column.
+ANALYSIS_MODE_INDEX = _LOADED_ANALYSIS_MODE if _LOADED_ANALYSIS_MODE in (0, 2) else 0
 
 # 3-band detector state.
 # THREEBAND_SELECTED: which band (0=LOW, 1=MID, 2=HIGH) drives output in "3-Band" mode.
 # THREEBAND_VIEW_MODE: which OLED 3-band view to draw (0=spectrum, 1=rectangles, 2=detail).
 THREEBAND_SELECTED = 0
-THREEBAND_VIEW_MODE = 0
+THREEBAND_VIEW_MODE = 1  # LOW/MID/HIGH "cards" view (rectangles); the only 3-Band view used
 
 # 3-band detector update rate (kept for legacy code compatibility)
 _last_3band_update = 0.0
@@ -886,8 +1050,8 @@ submenu_editing = False  # Label of selected column is always highlighted
 # Submenu column labels for each tab
 SUBMENU_LABELS = {
     "Modes": ["Program", "Cycle", "Beats"],
-    "Settings": ["Gain", "Presets", ""],           # 3rd column blank (Detect mode locked to "old")
-    "Setup": ["Output", "Chans", ""],              # Output=Dimmer/DMX, Chans=4-24; col 3 blank (layout)
+    "Settings": ["Gain", "Presets", "AGC"],        # Gain, Presets, AGC=On/Off
+    "Setup": ["Output", "Chans", "Detect"],        # Output=Dimmer/DMX, Chans=4-24, Detect=Classic/3-Band analysis
 }
 
 # HOME controls (always visible on bottom half)
@@ -1227,15 +1391,21 @@ def get_band_energy_with_q(fft_mag, freqs, center_hz, q):
     return float(energy)
 
 def get_envelope_times(center_hz):
-    """Return (attack_ms, release_ms) based on frequency.
-    Low frequencies use fast attack to capture kick transients (2-5ms),
-    while highs need even faster response."""
-    if center_hz < 200:      # Lows
-        return (3.0, 60.0)   # Fast attack for kick transients, moderate release
-    elif center_hz < 2000:   # Mids
-        return (8.0, 80.0)    # Default
-    else:                    # Highs
-        return (4.0, 50.0)    # Fast attack, quick release
+    """Return (attack_ms, release_ms) matched to the transient in the selected band.
+
+    Higher bands carry faster transients that repeat more quickly (16th-note hats),
+    so both attack and release get shorter as the center climbs. This is what lets a
+    snare or hat read as a clean, separate hit instead of a smeared blob the way a
+    kick-tuned 8/40 ms envelope would leave it. Wired into the classic detector via
+    CLASSIC_ADAPTIVE_ENV so it re-times whenever the Freq encoder moves the band."""
+    if center_hz < 200:        # Sub / kick body
+        return (3.0, 50.0)     # fast attack, release long enough to ride one kick's body
+    elif center_hz < 1000:     # Low-mid / snare body, toms
+        return (4.0, 45.0)
+    elif center_hz < 4000:     # Mid / snare crack, claps
+        return (3.0, 38.0)
+    else:                      # Highs / hats, cymbals
+        return (2.0, 28.0)     # very fast so rapid hats separate into distinct hits
 
 def format_release_display(ms_value):
     """Format release time for display. Shows seconds with 1 decimal for values >= 1000ms."""
@@ -1938,17 +2108,20 @@ class BiquadBandpass:
         self.b0,self.b1,self.b2 = b0/a0, b1/a0, b2/a0
         self.a1,self.a2 = a1/a0, a2/a0
     def process(self, x):
-        y = np.empty_like(x, dtype=np.float32)
+        # Recursive (IIR) biquad — inherently sequential. Iterate a Python list rather than
+        # indexing the numpy array element-by-element: same math, but far less per-sample
+        # overhead, so this GIL-held loop can't starve the audio worker during OLED renders.
         b0,b1,b2,a1,a2 = self.b0,self.b1,self.b2,self.a1,self.a2
         x1,x2,y1,y2 = self.x1,self.x2,self.y1,self.y2
-        for i in range(len(x)):
-            xi = float(x[i])
+        out = []
+        ap = out.append
+        for xi in x.tolist():
             yo = b0*xi + b1*x1 + b2*x2 - a1*y1 - a2*y2
-            y[i] = yo
+            ap(yo)
             x2, x1 = x1, xi
             y2, y1 = y1, yo
         self.x1,self.x2,self.y1,self.y2 = x1,x2,y1,y2
-        return y
+        return np.asarray(out, dtype=np.float32)
 
 class EnvDetector:
     def __init__(self, sr, attack_ms=8.0, release_ms=80.0):
@@ -1959,16 +2132,20 @@ class EnvDetector:
         self.alpha_a = math.exp(-1.0/(max(1e-3, attack_ms)*1e-3*self.sr))
         self.alpha_r = math.exp(-1.0/(max(1e-3, release_ms)*1e-3*self.sr))
     def process(self, x):
-        out = np.empty_like(x, dtype=np.float32)
+        # Attack/release follower — the per-sample branch makes it non-LTI, so it stays a loop,
+        # but iterating a Python list (not numpy element access) cuts the overhead that would
+        # otherwise let a render frame starve the audio worker. Same math as before.
         y = self.y
         aa, ar = self.alpha_a, self.alpha_r
-        for i in range(len(x)):
-            s = abs(float(x[i]))
+        out = []
+        ap = out.append
+        for xi in x.tolist():
+            s = xi if xi >= 0.0 else -xi
             if s > y: y = aa*y + (1.0-aa)*s
             else:     y = ar*y + (1.0-ar)*s
-            out[i] = y
+            ap(y)
         self.y = y
-        return out
+        return np.asarray(out, dtype=np.float32)
 
 class Agc:
     def __init__(self, target=0.02, tau=0.95, max_gain=8.0):
@@ -2062,24 +2239,73 @@ _flux_band_smax     = 0.01
 _flux_band_meter_ema = 0.0
 
 
-def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
-    """Faithful restore of the old project's signal chain, with noise gate.
+def _classic_scaled_gain(center_hz):
+    """Deterministic per-frequency gain for AGC_GAIN_MODE="scaled".
 
-    Pipeline: bandpass -> envelope -> noise gate -> AGC -> outer EMA -> live_band_env
+    A fixed curve that rises with band center to offset music's spectral tilt (highs are
+    quieter than lows), so mids/highs get more boost than the low end without any signal
+    analysis — nothing to mis-lock onto. g == AGC_FIXED_GAIN at FREQ_GAIN_REF_HZ."""
+    g = AGC_FIXED_GAIN * (max(1.0, float(center_hz)) / FREQ_GAIN_REF_HZ) ** FREQ_GAIN_SLOPE
+    return max(FREQ_GAIN_MIN, min(AGC_MAX_GAIN, g))
+
+
+def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
+    """Band-agnostic transient detector (bandpass + envelope + calibrated gain).
+
+    The same recipe that locks onto the kick in the low end works on the snare in the
+    mids or the hats in the highs, because: the "is this a hit?" test is taken RELATIVE
+    to the selected band's own learned ambient floor (not one absolute, kick-sized gate);
+    the envelope follower re-times itself to the band (fast for hats, slower for kicks);
+    the gain rises with frequency (AGC_GAIN_MODE, default "scaled") to offset the fact
+    that highs carry less energy; and the meter reads the envelope ABOVE the floor so that
+    high gain doesn't lift the noise floor over the threshold. Whatever transient pops
+    above the floor in the targeted range drives output.
+
+    Pipeline: bandpass -> (freq-adaptive) envelope -> learned-floor gate/onset test
+              -> per-frequency gain (scaled|fixed|calibrate|continuous) -> floor-subtract
+              -> outer EMA -> live_band_env
     Returns: (live_band_env, trigger_score) -- both equal in this mode.
     """
-    global classic_abs_ema
+    global classic_abs_ema, _classic_floor, _classic_floor_key, _classic_env_times
+    global _agc_frozen, _agc_calib_center, _agc_calib_q
+    global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
+    global _classic_onset_hold, _classic_onset_ok
     bp_obj.set_params(band.center, band.q)
+
+    # Frequency-adaptive envelope: re-time only when the band actually moves into a range
+    # with different times (cheap — avoids redesigning the follower every block).
+    if CLASSIC_ADAPTIVE_ENV:
+        t = get_envelope_times(band.center)
+        if t != _classic_env_times:
+            envd_obj.set_times(t[0], t[1])
+            _classic_env_times = t
+
+    # Band change (Freq/Q moved): forget the old band's learned floor/baseline so the new
+    # band re-learns fast instead of carrying a loud low-band floor onto quiet hats.
+    key = (band.center, band.q)
+    if _classic_floor_key != key:
+        _classic_floor_key = key
+        _classic_floor = CLASSIC_HIT_FLOOR_ABS
+        _classic_peak_avg = 0.0
+
     y_bp  = bp_obj.process(x_block)
     e_env = envd_obj.process(y_bp)
     e_mean_raw = float(np.mean(e_env))
+    e_peak = float(np.max(e_env)) if len(e_env) else 0.0
 
     denom = max(AGC_TARGET * CLASSIC_UI_SCALE, 1e-10)
 
-    # Noise gate: if the raw band envelope is below the absolute floor, freeze the
-    # AGC (don't ramp up to chase noise) and decay the displayed envelope toward 0.
-    # Without this, AGC pumps room noise up to ~AGC_TARGET and live_band_env sits
-    # near 1.0 even with no signal.
+    # Learn the band's ambient floor on steady/decaying frames only (rising transients must
+    # not drag it up). This is the crux of working in ANY band: the floor tracks how much
+    # absolute energy the selected range actually carries, so the relative hit test below
+    # means the same thing whether it's a loud kick band or a quiet hat band.
+    if e_peak <= _classic_prev_peak:
+        _classic_floor = CLASSIC_FLOOR_DECAY * _classic_floor + (1.0 - CLASSIC_FLOOR_DECAY) * e_mean_raw
+    _classic_floor = max(CLASSIC_HIT_FLOOR_ABS * 0.25, _classic_floor)
+
+    # Silence gate (absolute, low): only genuine silence/room-noise decays the meter to 0.
+    # Kept absolute (not floor-relative) so sustained in-band content still reads on the
+    # meter — the floor-relative logic is for HIT detection, not for muting the display.
     if e_mean_raw < NOISE_GATE_RMS:
         a_em = ENV_EMA
         # Decay toward zero (no signal contribution) at the same EMA rate.
@@ -2090,26 +2316,26 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
             n = 1
         decay = a_em ** n
         classic_abs_ema = float(classic_abs_ema) * decay
+        _classic_prev_peak = e_peak
         lbe = min(1.0, float(classic_abs_ema) / denom)
         return lbe, lbe
 
     # --- Transient / onset test on the band-envelope PEAK (all gain modes) ---
-    # A "hit" is a genuine attack: band-env peak (a) above an absolute floor,
+    # A "hit" is a genuine attack: band-env peak (a) above the RELATIVE floor,
     # (b) well above its own slow moving average, (c) rising vs the previous block.
     # (c) rejects sustained content (a drone's peak ~= its average and doesn't keep
     # rising) and collapses a multi-block kick into one hit on its attack. The average
     # is seeded to the first peak so steady content reads ratio ~1 (not a spike during
     # a ramp from zero). This drives BOTH the peak-gated calibration AND the firing
     # gate, so low-level/boosted content with no real attack can't trigger.
-    global _agc_frozen, _agc_calib_center, _agc_calib_q
-    global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
-    global _classic_onset_hold, _classic_onset_ok
-    e_peak = float(np.max(e_env)) if len(e_env) else 0.0
     if _classic_peak_avg <= 0.0:
         _classic_peak_avg = e_peak
     else:
         _classic_peak_avg = CLASSIC_PEAK_AVG_COEF * _classic_peak_avg + (1.0 - CLASSIC_PEAK_AVG_COEF) * e_peak
-    above_floor = e_peak > NOISE_GATE_RMS * CLASSIC_ONSET_MIN_MULT
+    # Relative hit floor: clear either a low absolute backstop OR the band's own ambient
+    # floor scaled up — so hats (tiny absolute energy) and kicks (large) both qualify.
+    hit_floor = max(CLASSIC_HIT_FLOOR_ABS, _classic_floor * CLASSIC_ONSET_MIN_MULT)
+    above_floor = e_peak > hit_floor
     # Calibration hit (used only in calibrate mode): peak pops above its slow baseline.
     is_hit = above_floor and (e_peak > _classic_peak_avg * CLASSIC_ONSET_RATIO) and (e_peak > _classic_prev_peak)
     # Firing attack: a SHARP relative rise this block — independent of the seeded
@@ -2121,13 +2347,29 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
     # or two after the raw attack, so don't require exact alignment).
     if is_attack:
         _classic_onset_hold = CLASSIC_ONSET_HOLD_BLOCKS
-    _classic_onset_ok = (not CLASSIC_ONSET_GATE) or (_classic_onset_hold > 0)
+    # AGC off = "straightforward" mode: fire purely on the band env crossing the threshold
+    # (no transient/onset requirement), so the meter you see is exactly what triggers.
+    if not AGC_ON:
+        _classic_onset_ok = True
+    else:
+        _classic_onset_ok = (not CLASSIC_ONSET_GATE) or (_classic_onset_hold > 0)
     if _classic_onset_hold > 0:
         _classic_onset_hold -= 1
 
     # Gain that scales the band envelope so hits are well-defined on the meter.
+    # For "calibrate" we scale with the currently HELD gain and refine it *after* the meter
+    # is computed (below), from the realized meter at hits — see the calibration block.
+    calibrating = False
     if not AGC_ON:
+        # AGC OFF = truly no gain (unity). The meter shows the RAW in-band level so it is exactly
+        # what it is — no adaptive calibration, no fixed boost, no per-frequency curve. Set the
+        # operating level with INPUT_GAIN and read the threshold straight off the bar. Fires on
+        # the bar crossing the threshold (onset gate already forced open above).
         g_agc = 1.0
+    elif AGC_GAIN_MODE == "scaled":
+        # Fixed per-frequency curve (default): rises with band center to offset spectral tilt.
+        # Deterministic — identical every run, nothing to auto-detect or mis-lock onto.
+        g_agc = _classic_scaled_gain(band.center)
     elif AGC_GAIN_MODE == "fixed":
         # Constant boost: identical every run, nothing to auto-detect. Consistent by
         # construction — a threshold set once always means the same thing.
@@ -2136,41 +2378,57 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
         # Always-adapting AGC (levels/pumps over time).
         g_agc = agc_obj.update(e_mean_raw)
     else:
-        # "calibrate": auto-calibrate then hold, calibrated ONLY off the transient hits
-        # detected above. Sustained/out-of-band content can't set the gain — it waits.
-        # Re-calibrate if the targeted band moved (old gain was for a different band).
+        # "calibrate": auto-calibrate then hold. Re-calibrate if the band moved (old gain
+        # was for a different range — a kick's gain must not carry onto quiet hats).
         if _agc_calib_center != band.center or _agc_calib_q != band.q:
             _agc_calib_center = band.center
             _agc_calib_q = band.q
             _agc_frozen = False
             _classic_calib_hits = 0
             _classic_calib_sum = 0.0
-        if _agc_frozen:
-            g_agc = agc_obj.gain              # hold the calibrated gain — consistent per hit
-        elif is_hit:
-            # Set gain so the average hit level maps to AGC_TARGET; only ever sees peaks.
-            _classic_calib_hits += 1
-            _classic_calib_sum += e_mean_raw
-            avg_hit = _classic_calib_sum / _classic_calib_hits
-            agc_obj.gain = min(AGC_MAX_GAIN, max(0.1, AGC_TARGET / max(1e-6, avg_hit)))
-            g_agc = agc_obj.gain
-            if _classic_calib_hits >= AGC_CALIBRATE_HITS:
-                _agc_frozen = True
-                ui_flash("AGC locked", 0.8)
-        else:
-            g_agc = agc_obj.gain              # between hits: hold, don't adapt to non-peaks
+            agc_obj.gain = AGC_FIXED_GAIN  # fall back to fixed default until re-locked
+        g_agc = agc_obj.gain                  # hold; refine after the meter (calibration block)
+        calibrating = not _agc_frozen
     wgt   = math.sqrt(max(1.0, band.center / 100.0)) if WEIGHTING_ON else 1.0
-    e_scaled = e_env * (g_agc * wgt)
+    # Read the envelope ABOVE the learned floor before scaling: steady noise sits at the floor
+    # and maps to ~0 on the meter regardless of how high the (frequency-scaled) gain is, so the
+    # meter falls back between hits and re-arms. Transients are well above the floor, so their
+    # reading is barely affected. (Only the tiny floor is removed; the shape/peak is preserved.)
+    e_excess = np.maximum(0.0, e_env - _classic_floor * CLASSIC_FLOOR_SUBTRACT)
+    e_scaled = e_excess * (g_agc * wgt)
 
-    # Per-sample EMA on the scaled envelope, like the old project
+    # Outer EMA on the scaled envelope. Only the FINAL value is used (as the meter and as the
+    # next block's seed), so compute it directly instead of a per-sample Python loop: the state
+    # after n samples is a_em^n * seed + (1-a_em) * sum_k a_em^(n-1-k) * x[k]. Same result, but
+    # vectorized (numpy releases the GIL) so it can't stall the worker during an OLED render.
     va  = classic_abs_ema
     a_em = ENV_EMA
-    for s in e_scaled:
-        va = a_em * va + (1.0 - a_em) * float(s)
+    n = len(e_scaled)
+    if n:
+        w = (1.0 - a_em) * (a_em ** np.arange(n - 1, -1, -1, dtype=np.float64))
+        va = (a_em ** n) * float(va) + float(np.dot(np.asarray(e_scaled, dtype=np.float64), w))
     classic_abs_ema = va
 
     # Map AGC-scaled envelope to 0..1 (CLASSIC_UI_SCALE=1.0 lets it reach 1.0)
-    lbe = min(1.0, float(va) / denom)
+    raw_meter = float(va) / denom
+    lbe = min(1.0, raw_meter)
+
+    # Calibrate-then-hold: refine the held gain from the REALIZED meter at transient hits, so
+    # the locked meter reads the same at a hit in ANY band. Keying on the realized meter (not
+    # the raw envelope peak) is what makes it band-agnostic: the meter samples the envelope at
+    # block boundaries, so a sharp hat reads lower than a broad kick for the same peak — this
+    # loop cancels exactly that difference. Only genuine in-band transients (is_hit) count, so
+    # drones/no-signal can't set the gain; it simply waits for real hits.
+    if calibrating and is_hit and g_agc > 0.0 and raw_meter > 1e-6:
+        target = CLASSIC_CALIB_HEADROOM
+        cand = g_agc * (target / raw_meter)     # gain that would have put this hit at target
+        _classic_calib_hits += 1
+        _classic_calib_sum += cand
+        agc_obj.gain = min(AGC_MAX_GAIN, max(0.1, _classic_calib_sum / _classic_calib_hits))
+        if _classic_calib_hits >= AGC_CALIBRATE_HITS:
+            _agc_frozen = True
+            ui_flash("AGC locked", 0.8)
+
     return lbe, lbe
 
 
@@ -2415,6 +2673,7 @@ def _reset_trigger_state():
     global _agc_frozen, _agc_calib_center, _agc_calib_q
     global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
     global _classic_onset_hold, _classic_onset_ok
+    global _classic_floor, _classic_floor_key, _classic_env_times
     _manual_meter = 0.0
     # Re-run AGC peak-calibration and drop the held gain back to unity.
     _agc_frozen = False
@@ -2426,6 +2685,10 @@ def _reset_trigger_state():
     _classic_calib_sum = 0.0
     _classic_onset_hold = 0
     _classic_onset_ok = True
+    # Band-agnostic detector state: force a fresh floor learn + envelope re-time next block.
+    _classic_floor = CLASSIC_HIT_FLOOR_ABS
+    _classic_floor_key = None
+    _classic_env_times = None
     try:
         agc.gain = 1.0
     except NameError:
@@ -2487,9 +2750,13 @@ class ThreeBandOnsetDetector:
     
     # Guardrail constants - enforce safe band ranges
     MIN_WIDTH_HZ = {"LOW": 40, "MID": 200, "HIGH": 500}
-    MAX_WIDTH_HZ = {"LOW": 600, "MID": 3000, "HIGH": 8000}
-    # Trigger threshold range for UI (0-1)
-    TRIGGER_RANGE = (0.05, 0.95)
+    # Max band WIDTH (f_hi - f_lo) in Hz — this is the number shown on the home screen
+    # in width-adjust mode. MID up to 7k, HIGH up to 16k so the readout reaches those.
+    MAX_WIDTH_HZ = {"LOW": 600, "MID": 7000, "HIGH": 16000}
+    # Trigger threshold range for UI (0-1). Top is 1.0 so sensitivity 0 maps to
+    # trigger_thresh=1.0: normalized_slope is capped at 1.0 and the fire test is a
+    # strict `>`, so NOTHING can trigger at sens 0 (no spurious peaks leak through).
+    TRIGGER_RANGE = (0.05, 1.0)
     
     def __init__(self, sample_rate, n_fft=2048):
         self.sr = sample_rate
@@ -2514,16 +2781,13 @@ class ThreeBandOnsetDetector:
         # gain: Boost slope signal before limiting (higher = more sensitive)
         #
         self.bands = [
-            # LOW: Kick - fast attack, slow decay for clean sawtooth
-            # trigger_thresh 0.24 = moderate sensitivity (UI shows 30 at this value)
-            # lag_attack 0.4 = follow rising signal at 40% per frame
-            # lag_decay 0.015 = slow decay (1.5% per frame) for sawtooth shape
-            # gain 6.3 = +16dB boost (UI shows 0dB at this value as new center)
-            BandConfig("LOW", 40, 150, 0.24, 200, 0.4, 0.015, 6.3),
-            # MID: Snare - similar tuning
-            BandConfig("MID", 1000, 4000, 0.24, 120, 0.35, 0.02, 6.3),
-            # HIGH: Hats - similar tuning
-            BandConfig("HIGH", 6000, 16000, 0.24, 50, 0.5, 0.03, 6.3),
+            # trigger_thresh default 0.40: with adaptive normalization (Stage 4) prominent onsets
+            # read ~1.0, so a mid-range threshold rejects weak/ghost onsets. Tune per band with the
+            # E2 Thresh knob in 3-Band mode. (gain is only used on the legacy THREEBAND_ADAPTIVE=0 path.)
+            # lag_attack = follow rising signal per frame; lag_decay = slow decay for a clean sawtooth.
+            BandConfig("LOW", 40, 150, 0.40, 200, 0.4, 0.015, 6.3),      # Kick
+            BandConfig("MID", 1000, 4000, 0.40, 120, 0.35, 0.02, 6.3),   # Snare
+            BandConfig("HIGH", 6000, 16000, 0.40, 50, 0.5, 0.03, 6.3),   # Hats
         ]
         
         # Cross-band suppression: when one band triggers, suppress others briefly
@@ -2551,7 +2815,7 @@ class ThreeBandOnsetDetector:
         
         # Display values for UI
         self.display_flux = [0.0, 0.0, 0.0]     # Normalized slope for display (0-1)
-        self.display_thresh = [0.24, 0.24, 0.24]  # Trigger threshold for display (default: UI shows 30)
+        self.display_thresh = [0.40, 0.40, 0.40]  # Trigger threshold for display (matches band defaults)
         self.scaled_onset = [0.0, 0.0, 0.0]     # Alias for display_flux (UI compat)
         
         # Legacy aliases for UI compatibility
@@ -2571,7 +2835,43 @@ class ThreeBandOnsetDetector:
         # AGC disabled
         self.agc_enabled = False
         self.agc_gain = 1.0
-    
+
+        # ===== Adaptive onset normalization =====================================
+        # Makes the trigger threshold mean the same thing across songs/levels instead
+        # of needing to be hand-tuned low. Set THREEBAND_ADAPTIVE=0 to fall back to the
+        # old fixed-gain path (for A/B comparison). All knobs are env-tunable.
+        self.adaptive = os.environ.get("THREEBAND_ADAPTIVE", "1").strip().lower() not in ("0", "false", "no", "off")
+        # Stage 1 energy: blend of band mean and band peak (0=mean .. 1=peak). Peak preserves
+        # hat/snare transients that averaging over a wide band otherwise washes out.
+        self.energy_peak_mix = float(os.environ.get("THREEBAND_PEAK_MIX", "0.6"))
+        # Stage 4 adaptive normalization: peak-follower of the raw slope, per band. Uses a slow
+        # decay (long memory ~1.5s) and no headroom so onsets SPREAD across 0-1 by strength -
+        # strongest recent hit ~1.0, weaker hits proportionally less. This is what makes the
+        # Sensitivity knob dramatic: the threshold then meaningfully gates weak vs strong onsets.
+        # (A fast decay / >1 headroom saturates every onset to ~1.0, making Sens nearly inert.)
+        self.slope_peak = [self._env_float("THREEBAND_SLOPE_FLOOR", 0.004)] * 3
+        self.slope_peak_decay = float(os.environ.get("THREEBAND_PEAK_DECAY", "0.986"))  # per ~20ms update (~1.4s memory)
+        self.slope_peak_floor = self._env_float("THREEBAND_SLOPE_FLOOR", 0.004)         # min ref (silence guard)
+        self.norm_headroom = float(os.environ.get("THREEBAND_HEADROOM", "1.0"))         # 1.0 = only the strongest hit saturates
+        # Per-band level gate: without it, the adaptive normalizer amplifies quiet-passage noise
+        # up to ~1.0 (its reference decays toward the floor), causing false triggers in a band with
+        # no real content. Two guards, both must pass for an onset to count:
+        #   1. Energy must be meaningfully above the band's learned ambient floor (multiplicative +
+        #      additive), and
+        #   2. the raw energy-flux must exceed an absolute onset floor (a real hit is ~0.2-0.3; noise
+        #      is ~0.01-0.03) — this is the main knob for "no lows -> no LOW triggers".
+        self.energy_floor = [0.0, 0.0, 0.0]
+        self.gate_margin = float(os.environ.get("THREEBAND_GATE_MARGIN", "0.03"))
+        self.gate_mult = self._env_float("THREEBAND_GATE_MULT", 1.30)     # energy > floor * this
+        self.onset_floor = self._env_float("THREEBAND_ONSET_FLOOR", 0.035)  # min energy-flux to fire
+
+    @staticmethod
+    def _env_float(name, default):
+        try:
+            return float(os.environ.get(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
     def push_samples(self, samples):
         """Add samples to ring buffer - NO processing, just store."""
         if len(samples) == 0:
@@ -2611,20 +2911,41 @@ class ThreeBandOnsetDetector:
         5. Trigger: Fire when normalized slope crosses trigger threshold
         """
         now = time.time()
-        
+
+        # Precompute (cached) FFT band centers and each 3-band band's member indices so the per-hop
+        # analysis is a few vectorized numpy ops instead of a 3x64 Python loop. That loop ran ~47x/s
+        # and held the GIL enough to starve the OLED render thread (whole-screen frame drop on
+        # trigger in 3-Band). Index lists are rebuilt only when a band's width changes.
+        fb = np.asarray(fft_bands, dtype=np.float32)
+        centers = getattr(self, "_fft_centers", None)
+        if centers is None or len(centers) != len(fft_band_freqs):
+            centers = np.array([(lo + hi) * 0.5 for (lo, hi) in fft_band_freqs], dtype=np.float32)
+            self._fft_centers = centers
+            self._band_idx = [None, None, None]
+            self._band_idx_key = [None, None, None]
+
         # First pass: compute normalized slope for all bands
         for i, band in enumerate(self.bands):
-            # ===== Stage 1: ANALYZE - Get band energy =====
-            band_energy = 0.0
-            band_count = 0
-            for j, (band_lo, band_hi) in enumerate(fft_band_freqs):
-                band_center = (band_lo + band_hi) / 2
-                if band.f_lo <= band_center <= band.f_hi:
-                    band_energy += fft_bands[j]
-                    band_count += 1
-            if band_count > 0:
-                band_energy /= band_count
-            self.energy[i] = float(band_energy)
+            # ===== Stage 1: ANALYZE - Get band energy (vectorized) =====
+            key = (band.f_lo, band.f_hi)
+            if self._band_idx[i] is None or self._band_idx_key[i] != key:
+                self._band_idx[i] = np.where((centers >= band.f_lo) & (centers <= band.f_hi))[0]
+                self._band_idx_key[i] = key
+            idx = self._band_idx[i]
+            if idx.size > 0:
+                vals = fb[idx]
+                band_mean = float(vals.mean())
+                band_max = float(vals.max())
+            else:
+                band_mean = 0.0
+                band_max = 0.0
+            if self.adaptive:
+                # Blend mean with peak so a transient in part of a wide band (e.g. a hat in
+                # the 6-16kHz HIGH band) isn't averaged away by its quiet neighbours.
+                e = (1.0 - self.energy_peak_mix) * band_mean + self.energy_peak_mix * band_max
+            else:
+                e = band_mean
+            self.energy[i] = float(e)
             
             # ===== Stage 2: LAG - Asymmetric smoothing (like Lag CHOP) =====
             # Fast attack: follow rising signal quickly
@@ -2637,15 +2958,46 @@ class ThreeBandOnsetDetector:
                 self.lagged_energy[i] += (self.energy[i] - self.lagged_energy[i]) * band.lag_decay
             
             # ===== Stage 3: SLOPE - Derivative (like Slope CHOP) =====
-            # Half-wave rectified: only positive slopes (rising edges)
-            # This is what makes kicks stand out - they have the fastest rise
-            raw_slope = max(0.0, self.lagged_energy[i] - self.prev_lagged[i])
+            # Half-wave rectified: only positive changes (rising edges / onsets).
+            # Adaptive path uses flux on the RAW energy (responsive spectral flux): a weaker onset
+            # arriving under the slow decaying tail of a previous hit still registers, and its size
+            # is proportional to the hit's strength - giving the spread the Sensitivity knob needs.
+            # Legacy path keeps the lagged-envelope slope (sawtooth shape).
+            if self.adaptive:
+                raw_slope = max(0.0, self.energy[i] - self.prev_energy[i])
+            else:
+                raw_slope = max(0.0, self.lagged_energy[i] - self.prev_lagged[i])
             self.slope[i] = raw_slope
             self.prev_lagged[i] = self.lagged_energy[i]
+            self.prev_energy[i] = self.energy[i]
             
             # ===== Stage 4: GAIN + LIMIT (like Math CHOP + Limit CHOP) =====
-            # Apply gain to boost slope to usable range, then clamp to 0-1
-            self.normalized_slope[i] = min(1.0, raw_slope * band.gain)
+            if self.adaptive:
+                # Adaptive normalization: divide the onset by a per-band SLOW-decaying peak of
+                # recent onsets. The strongest recent hit reads ~1.0 and weaker hits read
+                # proportionally less, so onsets spread across 0-1 by strength (independent of the
+                # song's absolute level) and the Sensitivity threshold can gate weak vs strong.
+                if raw_slope > self.slope_peak[i]:
+                    self.slope_peak[i] = raw_slope
+                else:
+                    self.slope_peak[i] = max(self.slope_peak_floor, self.slope_peak[i] * self.slope_peak_decay)
+                norm = (raw_slope / self.slope_peak[i]) * self.norm_headroom
+
+                # Level gate: learn each band's ambient energy floor (falls fast, rises slow so
+                # it tracks the quiet baseline without chasing transients). An onset counts only if
+                # the band is well above its own floor AND the raw flux clears the absolute onset
+                # floor — the latter is what stops silence/noise from being normalized into triggers.
+                e = self.energy[i]
+                rate = 0.02 if e > self.energy_floor[i] else 0.20
+                self.energy_floor[i] += (e - self.energy_floor[i]) * rate
+                gate_level = max(self.energy_floor[i] * self.gate_mult,
+                                 self.energy_floor[i] + self.gate_margin)
+                active = (e > gate_level) and (raw_slope >= self.onset_floor)
+
+                self.normalized_slope[i] = min(1.0, norm) if active else 0.0
+            else:
+                # Legacy fixed-gain path (THREEBAND_ADAPTIVE=0).
+                self.normalized_slope[i] = min(1.0, raw_slope * band.gain)
             
             # Store for legacy compatibility
             self.flux[i] = self.slope[i]
@@ -2769,7 +3121,18 @@ class ThreeBandOnsetDetector:
         """Get the current trigger threshold for a band (for UI display)."""
         band = self.bands[band_idx]
         return band.trigger_thresh
-    
+
+    def adjust_threshold(self, band_idx, delta):
+        """Nudge a single band's trigger threshold (sensitivity), clamped to TRIGGER_RANGE.
+
+        Each band keeps its own trigger_thresh, so LOW/MID/HIGH are tuned independently.
+        Lower threshold = more sensitive (fires on smaller onsets)."""
+        band = self.bands[band_idx]
+        lo, hi = self.TRIGGER_RANGE
+        band.trigger_thresh = max(lo, min(hi, band.trigger_thresh + delta))
+        self.display_thresh[band_idx] = band.trigger_thresh
+        return band.trigger_thresh
+
     def is_flash_active(self, band_idx):
         """Check if trigger flash is active for a band (time-based)."""
         return (time.time() - self.trigger_flash_time[band_idx]) < TRIGGER_FLASH_DURATION
@@ -2778,7 +3141,7 @@ class ThreeBandOnsetDetector:
         """Adjust band width with band-specific cropping behavior.
         
         - LOW: Crops from right only (anchored at low end) - adjust how high kicks reach
-        - MID: Crops from both sides uniformly (centered) - adjust snare width symmetrically
+        - MID: Crops from right only (anchored at low end ~1kHz) - push the top up toward 7kHz
         - HIGH: Crops from left only (anchored at high end) - adjust how low hats reach
         """
         band = self.bands[band_idx]
@@ -2793,19 +3156,15 @@ class ThreeBandOnsetDetector:
         new_width = max(min_w, min(max_w, new_width))
         
         # Compute new bounds based on band type
-        if band.name == "LOW":
-            # Anchor at low end, adjust high end only
+        if band.name in ("LOW", "MID"):
+            # Anchor at low end, adjust high end only. MID keeps its low edge (~1kHz)
+            # fixed and pushes the top up toward 7kHz as width grows.
             new_lo = band.f_lo
             new_hi = band.f_lo + new_width
-        elif band.name == "HIGH":
+        else:  # HIGH
             # Anchor at high end, adjust low end only
             new_hi = band.f_hi
             new_lo = band.f_hi - new_width
-        else:  # MID
-            # Symmetric around center (original behavior)
-            center = (band.f_lo + band.f_hi) / 2
-            new_lo = center - new_width / 2
-            new_hi = center + new_width / 2
         
         # Clamp to valid frequency range
         if new_lo < 20:
@@ -3026,16 +3385,17 @@ import threading
 _param_lock = threading.Lock()
 
 
-def _apply_encoder_delta(enc_idx, direction):
+def _apply_encoder_delta(enc_idx, direction, coarse=False):
     """Apply a single encoder quadrature step immediately (called from encoder_reader at 200Hz).
-    
+
     This decouples parameter updates from the OLED refresh rate for snappier feel.
     Encoders 3–5 (trigger, release, brightness) use a fixed step of one OLED unit per tick
     (no velocity scaling on those parameters).
-    
+
     Args:
         enc_idx: 1=Freq/Q, 2=Thresh, 3=Release/ReleaseMode, 4=Brightness
         direction: 1 for CW, -1 for CCW
+        coarse: threshold only — jump in steps of 10 (held switch, classic mode)
     """
     global BRIGHTNESS, RELEASE_MODE_INDEX
     global _brightness_target, _discrete_last_change
@@ -3102,10 +3462,21 @@ def _apply_encoder_delta(enc_idx, direction):
             return
 
         # ===== Encoder 3 (enc_idx=2): Trigger threshold — 1 display unit per click =====
+        # Held switch in classic mode (coarse=True) jumps by 10, snapping to the 10-grid.
         if enc_idx == 2:
             if BASE_PROGRAM == 6:
                 return
-            thresh_int = max(0, min(99, round(band.thresh * 99) + base_delta))
+            if ANALYSIS_MODE_INDEX == 2 and three_band_detector is not None:
+                # 3-Band: knob is per-band SENSITIVITY (turn up = more sensitive). Sensitivity is
+                # the inverse of the trigger threshold, so raising it LOWERS trigger_thresh.
+                step = 0.04 if coarse else 0.01
+                three_band_detector.adjust_threshold(THREEBAND_SELECTED, -base_delta * step)
+                return
+            cur = round(band.thresh * 99)
+            if coarse:
+                thresh_int = max(0, min(99, round(cur / 10) * 10 + base_delta * 10))
+            else:
+                thresh_int = max(0, min(99, cur + base_delta))
             band.thresh = thresh_int / 99.0
             return
 
@@ -3463,8 +3834,11 @@ def _handle_submenu_value_change(direction):
     """Handle value changes when encoder 1 is in editing mode for submenu columns."""
     global BASE_PROGRAM, CYCLES_BETWEEN_INDEX, CYCLES_BETWEEN, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
     global INPUT_GAIN_DB, DMX_OUTPUT_MODE, DMX_CHANNEL_COUNT
+    global AGC_ON, _agc_frozen, _agc_calib_center, _agc_calib_q
+    global _classic_calib_hits, _classic_calib_sum
     global CYCLE_STEPS_INDEX, CYCLE_STEPS, _cycle_state_before_ambient
-    
+    global ANALYSIS_MODE_INDEX
+
     tab = SUBMENU_TABS[submenu_tab]
     col = submenu_column
     
@@ -3532,6 +3906,10 @@ def _handle_submenu_value_change(direction):
             save_input_gain(INPUT_GAIN_DB)
             ui_flash(f"Gain: {format_input_gain_display()}", 0.5)
         elif col == 1:
+            # Presets are Classic-detector band presets; not applicable in 3-Band mode.
+            if ANALYSIS_MODE_INDEX == 2:
+                ui_flash("Presets: Classic only", 0.6)
+                return
             # Reset - cycle through presets (clamped, no looping)
             global DEFAULTS_MODE_INDEX
             new_idx = max(0, min(len(DEFAULTS_MODES) - 1, DEFAULTS_MODE_INDEX + direction))
@@ -3554,9 +3932,22 @@ def _handle_submenu_value_change(direction):
             save_defaults_mode(DEFAULTS_MODE_INDEX)
             ui_flash(f"Reset: {mode_name}", 0.5)
         elif col == 2:
-            # Detect column removed (mode locked to "old"). Navigation is also
-            # capped at col=1 for Settings, so this branch is defensive only.
-            pass
+            # AGC governs the Classic detector only; not applicable in 3-Band mode.
+            if ANALYSIS_MODE_INDEX == 2:
+                ui_flash("AGC: Classic only", 0.6)
+                return
+            # AGC On/Off. On = adaptive calibrate-then-hold detection. Off = "straightforward"
+            # fixed-boost mode where the bar shows the in-band level and it fires on crossing
+            # the threshold. Turn right -> On, left -> Off.
+            AGC_ON = (direction > 0)
+            # Reset calibration so re-enabling AGC re-locks cleanly for the current band.
+            _agc_frozen = False
+            _agc_calib_center = None
+            _agc_calib_q = None
+            _classic_calib_hits = 0
+            _classic_calib_sum = 0.0
+            save_agc_on(AGC_ON)
+            ui_flash(f"AGC: {'On' if AGC_ON else 'Off'}", 0.5)
     elif tab == "Setup":
         if col == 0:
             # Output mode (Dimmer/DMX)
@@ -3568,8 +3959,13 @@ def _handle_submenu_value_change(direction):
             save_dmx_channel_count(DMX_CHANNEL_COUNT)
             ui_flash(f"Chans: {DMX_CHANNEL_COUNT}", 0.5)
         elif col == 2:
-            # Column 3 is blank - no action
-            pass
+            # Analysis: toggle Classic (0) <-> 3-Band (2). Deterministic by turn direction
+            # (right = 3-Band, left = Classic); persisted so it survives restart.
+            new_mode = 2 if direction > 0 else 0
+            if new_mode != ANALYSIS_MODE_INDEX:
+                ANALYSIS_MODE_INDEX = new_mode
+                save_analysis_mode(ANALYSIS_MODE_INDEX)
+                ui_flash(f"Analysis: {'3-Band' if new_mode == 2 else 'Classic'}", 0.5)
 
 
 def encoder_reader():
@@ -3662,16 +4058,23 @@ def encoder_reader():
                     global _home_enc2_range_pct
                     _home_enc2_alt = not _home_enc2_alt
                     _home_enc2_range_pct = None
-                    ui_flash("Mode: Range" if _home_enc2_alt else "Mode: Freq", 0.5)
+                    if ANALYSIS_MODE_INDEX == 2:
+                        # 3-Band: E1 toggles between selecting the band and adjusting its width.
+                        ui_flash("Range" if _home_enc2_alt else "Select band", 0.5)
+                    else:
+                        ui_flash("Mode: Range" if _home_enc2_alt else "Mode: Freq", 0.5)
                     _enc_awaiting_release[0] = True
                 _enc_last_sw[0] = enc1_sw
 
                 # ===== Encoder 2 - Threshold =====
+                # Read the switch first so a held button can request coarse (×10) steps.
+                enc2_sw = _mcp_read(ENC2_SW)
                 direction = _read_encoder_quadrature(1, ENC2_CLK, ENC2_DT)
                 if direction != 0:
-                    _apply_encoder_delta(2, direction)
+                    coarse = (enc2_sw == 0 and
+                              DETECT_MODES[DETECT_MODE_INDEX] == "classic")
+                    _apply_encoder_delta(2, direction, coarse=coarse)
 
-                enc2_sw = _mcp_read(ENC2_SW)
                 if _enc_awaiting_release[1]:
                     if enc2_sw == 1:
                         _enc_awaiting_release[1] = False
@@ -3731,8 +4134,9 @@ def encoder_reader():
                     if enc5_sw == 1:
                         _enc_awaiting_release[4] = False
                 else:
+                    # Preset save is a Classic-detector action; disabled in 3-Band mode.
                     is_settings_reset = (SUBMENU_TABS[submenu_tab] == "Settings" and
-                                         submenu_column == 1)
+                                         submenu_column == 1 and ANALYSIS_MODE_INDEX != 2)
                     if enc5_sw == 0 and _enc_last_sw[4] == 1:
                         _enc1_press_time = time.time()
                         _enc1_save_progress = 0.0
@@ -3871,7 +4275,7 @@ def encoder_reader():
                             # Released before countdown finished: original short-tap action —
                             # cycle submenu column within the current tab.
                             _tab_name = SUBMENU_TABS[submenu_tab]
-                            _max_col = 1 if _tab_name in ("Setup", "Settings") else 2
+                            _max_col = 2  # all tabs (Modes/Settings/Setup) have 3 columns
                             submenu_column = (submenu_column + 1) % (_max_col + 1)
                             _col_label = SUBMENU_LABELS.get(_tab_name, [""])[submenu_column]
                             ui_flash(_col_label if _col_label else _tab_name, 0.4)
@@ -3923,10 +4327,18 @@ _ambient_next_time = 0.0  # Time when next channel switch happens
 # Trigger indicator for UI
 trigger_flash = 0.0  # Timestamp when last triggered (time.time())
 TRIGGER_FLASH_DURATION = 0.08  # How long the flash stays visible (seconds)
+# Stroke colour for the trigger border. Dimmer than full white so the full-perimeter flash does
+# not spike the SSD1322's current draw (which makes its regulator dim the interior). 0-255.
+_tf_level = int(os.environ.get("TRIGGER_FLASH_LEVEL", "150"))
+_tf_level = max(0, min(255, _tf_level))
+_TRIGGER_FLASH_COLOR = (_tf_level, _tf_level, _tf_level)
 
 bp   = None
 envd = None
 agc  = Agc(target=AGC_TARGET, tau=0.95, max_gain=AGC_MAX_GAIN)
+# Seed the pre-lock gain to the fixed default so calibrate mode is never weaker than
+# fixed mode before it locks — it can only improve (per-band) once it locks on hits.
+agc.gain = AGC_FIXED_GAIN
 
 # Classic detection (bandpass + envelope + AGC): absolute smoothed envelope before UI scaling
 classic_abs_ema = 0.0
@@ -4036,7 +4448,7 @@ def audio_loop():
                 x = indata[:, 1].astype(np.float32)
         else:
             x = indata[:, 0].astype(np.float32)
-        x = x * db_to_linear(INPUT_GAIN_DB)  # Apply input gain (dB)
+        x = x * db_to_linear(INPUT_GAIN_DB + INPUT_GAIN_EXTRA_DB)  # input gain (dB) + fixed UI-transparent boost
         # Optional high-pass before FFT (off by default for full-range EQ-style display)
         if FFT_HPF_HZ > 0:
             x, _fft_hp_y, _fft_hp_x_prev = apply_fft_highpass(x, SR, FFT_HPF_HZ, _fft_hp_y, _fft_hp_x_prev)
@@ -4057,7 +4469,7 @@ def audio_loop():
                 print(
                     f"[AUDIO_DBG] ch={AUDIO_INPUT_CHANNEL_MODE} "
                     f"raw_L={raw_l_db:.1f}dB x_peak={x_peak_db:.1f}dB "
-                    f"gain={INPUT_GAIN_DB}dB indata.shape={indata.shape} "
+                    f"gain={INPUT_GAIN_DB}+{INPUT_GAIN_EXTRA_DB}dB indata.shape={indata.shape} "
                     f"ovf={_audio_overflow_count} qdrop={_audio_qdrop_count} qdepth_max={_audio_q_depth_max}",
                     flush=True,
                 )
@@ -4267,8 +4679,13 @@ def audio_loop():
             effective_thresh = band.thresh
         elif ANALYSIS_MODE_INDEX == 2:
             # "3-Band": spectral-flux onset from the Freq-selected LOW/MID/HIGH band.
+            # Fire against the selected band's own trigger_thresh (tuned by the Thresh knob),
+            # matching the detector's internal trigger[] compare and the per-band card display.
             live_band_env, trigger_score = _trigger_flux_3band()
-            effective_thresh = band.thresh
+            if three_band_detector is not None:
+                effective_thresh = three_band_detector.bands[THREEBAND_SELECTED].trigger_thresh
+            else:
+                effective_thresh = band.thresh
         else:
             # "Normal": existing DETECT_MODES pipeline (biquad chain), unchanged.
             detect_mode = DETECT_MODES[DETECT_MODE_INDEX]
@@ -4945,9 +5362,25 @@ class OledUI:
             draw.rectangle((sel_low_x + 1, y, sel_high_x - 1, y + flash_height), fill=OLED_WHITE)
     
     def _draw_3band_rectangles_view(self, draw, x, y, width, height):
-        """Three rectangles with LOW/MID/HIGH text, selected has border, trigger fills inside."""
+        """Three LOW/MID/HIGH cards. Selected has a double border. Each card shows:
+          - a live "throughput" meter (right strip, peak-held): the amount of onset ABOVE the
+            band's trigger threshold — i.e. how much signal is actually clearing the gate. Empty
+            when nothing crosses; taller the harder a hit punches past the current Sensitivity.
+            Same 0..1 onset units across all three bands so they stay comparable.
+          - a Sensitivity slider along the bottom that fills rightward as Sens rises (same
+            direction as the E2 knob), and
+          - a label that inverts on a trigger.
+        No threshold line: the threshold is the inverse of Sensitivity, so a threshold marker
+        would move opposite to the knob and read backwards."""
         band_names = ["LOW", "MID", "HIGH"]
-        
+        lo_thr, hi_thr = three_band_detector.TRIGGER_RANGE
+
+        # UI-side peak-hold for the onset meter (draw-only; does not affect detection).
+        peak = getattr(self, "_3band_ui_peak", None)
+        if peak is None:
+            peak = [0.0, 0.0, 0.0]
+            self._3band_ui_peak = peak
+
         # Calculate rectangle dimensions with padding for selection border
         padding = 2  # Space for selection border on edges
         gap = 3  # Gap between rectangles
@@ -4955,33 +5388,62 @@ class OledUI:
         rect_width = (usable_width - gap * 2) // 3
         rect_height = height - 6  # Leave margin for selection border top/bottom
         rect_y = y + 3
-        
+
+        meter_w = 4  # width of the onset meter strip on the right of each card
+
         for i in range(3):
             rect_x = x + padding + i * (rect_width + gap)
             is_selected = (i == THREEBAND_SELECTED)
             triggered = three_band_detector.is_flash_active(i)
-            
+
             # Selected band: double border (outer indicator)
             if is_selected:
                 draw.rectangle((rect_x - 2, rect_y - 2, rect_x + rect_width + 1, rect_y + rect_height + 1), outline=OLED_WHITE)
-                draw.rectangle((rect_x, rect_y, rect_x + rect_width - 1, rect_y + rect_height - 1), outline=OLED_WHITE)
-            else:
-                # Non-selected: single outline
-                draw.rectangle((rect_x, rect_y, rect_x + rect_width - 1, rect_y + rect_height - 1), outline=OLED_WHITE)
-            
-            # Trigger: fill inside the rectangle
-            if triggered:
-                draw.rectangle((rect_x + 2, rect_y + 2, rect_x + rect_width - 3, rect_y + rect_height - 3), fill=OLED_WHITE)
-            
-            # Draw band name centered in rectangle
+            draw.rectangle((rect_x, rect_y, rect_x + rect_width - 1, rect_y + rect_height - 1), outline=OLED_WHITE)
+
+            # ===== Sensitivity slider along the bottom (fills rightward with Sens) =====
+            slider_y = rect_y + rect_height - 2
+            track_x0 = rect_x + 1
+            track_x1 = rect_x + rect_width - 2
+            thr = max(lo_thr, min(hi_thr, three_band_detector.bands[i].trigger_thresh))
+            sens = (hi_thr - thr) / max(1e-6, hi_thr - lo_thr)  # 0..1, high = more sensitive
+            draw.line((track_x0, slider_y, track_x1, slider_y), fill=OLED_GRAY)  # full-scale track
+            fw = int(sens * (track_x1 - track_x0))
+            if fw > 0:
+                draw.rectangle((track_x0, slider_y - 1, track_x0 + fw, slider_y), fill=OLED_WHITE)
+
+            # ===== Throughput meter strip (right side of card, above the slider) =====
+            # Show the onset ABOVE the trigger threshold, not the raw onset: this is the signal
+            # that actually clears the gate. Empty = nothing getting through at the current Sens;
+            # height = how far past the threshold the hit punched. Absolute margin (not rescaled
+            # per band) so the three bands read on the same 0..1 scale and stay comparable.
+            sx1 = rect_x + rect_width - 2
+            sx0 = sx1 - meter_w + 1
+            sy0 = rect_y + 2
+            sy1 = slider_y - 3
+            mh = max(1, sy1 - sy0)
+
+            band_thr = three_band_detector.bands[i].trigger_thresh
+            level = max(0.0, min(1.0, three_band_detector.display_flux[i] - band_thr))
+            peak[i] = max(level, peak[i] * 0.85)  # instant rise, ~0.4s decay at 15fps
+            fh = int(peak[i] * mh)
+            if fh > 0:
+                draw.rectangle((sx0, sy1 - fh, sx1, sy1), fill=OLED_WHITE)
+
+            # ===== Band label (left area, clear of the meter strip and slider) =====
             label = band_names[i]
             text_width = len(label) * 5
-            text_x = rect_x + (rect_width - text_width) // 2
-            text_y = rect_y + (rect_height - 8) // 2
-            
-            # Invert text color when triggered (so it's visible on filled background)
-            fill_color = OLED_BLACK if triggered else OLED_WHITE
-            draw.text((text_x, text_y), label, font=self._font_small, fill=fill_color)
+            label_left = rect_x + 1
+            label_right = sx0 - 3
+            text_x = label_left + max(0, (label_right - label_left - text_width) // 2)
+            text_y = rect_y + ((rect_height - 3) - 8) // 2
+
+            if triggered:
+                # Flash: invert the label so the trigger is unmistakable.
+                draw.rectangle((text_x - 1, text_y - 1, text_x + text_width, text_y + 8), fill=OLED_WHITE)
+                draw.text((text_x, text_y), label, font=self._font_small, fill=OLED_BLACK)
+            else:
+                draw.text((text_x, text_y), label, font=self._font_small, fill=OLED_WHITE)
     
     def _draw_3band_detail_view(self, draw, x, y, width, height):
         """Selected band detail view with VU meter, info, and running line graph.
@@ -5462,6 +5924,15 @@ class OledUI:
         if BASE_PROGRAM == 6:
             # AMBIENT mode: Speed, blank, Fade, Bright
             labels = ["Speed", "--", "Fade", "Brightness"]
+        elif ANALYSIS_MODE_INDEX == 2:
+            # 3-Band: E1 selects the band, or (after clicking E1) adjusts its frequency width;
+            # col 1 sets the selected band's sensitivity (E2).
+            labels = [
+                "Range" if _home_enc2_alt else "Band",
+                "Sens",
+                "R-Mode" if _home_enc4_alt else "Release",
+                "Brightness"
+            ]
         else:
             labels = [
                 "Range" if _home_enc2_alt else "Freq",
@@ -5496,7 +5967,20 @@ class OledUI:
                         val_str = f"{int(BRIGHTNESS * 100)}"
             else:
                 # Normal mode values
-                if i == 0:  # Frequency or Q
+                if i == 0 and ANALYSIS_MODE_INDEX == 2 and three_band_detector is not None:
+                    b3 = three_band_detector.bands[THREEBAND_SELECTED]
+                    if _home_enc2_alt:
+                        # Range mode: show the selected band's frequency width (Hz / kHz).
+                        w3 = b3.f_hi - b3.f_lo
+                        if w3 >= 1000:
+                            kw3 = w3 / 1000.0
+                            val_str = f"{kw3:.0f}k" if kw3 == int(kw3) else f"{kw3:.1f}k"
+                        else:
+                            val_str = f"{int(w3)}"
+                    else:
+                        # Select mode: show the selected band name (LOW/MID/HIGH).
+                        val_str = b3.name
+                elif i == 0:  # Frequency or Q
                     if _home_enc2_alt:
                         if _home_enc2_range_pct is not None:
                             _display_q_pct = _home_enc2_range_pct
@@ -5515,8 +5999,16 @@ class OledUI:
                             val_str = f"{freq_khz:.1f}kHz"
                         else:
                             val_str = f"{int(freq_hz)}Hz"
-                elif i == 1:  # Trigger threshold
-                    val_str = f"{int(_display_thresh * 99)}"
+                elif i == 1:  # Trigger threshold / 3-Band sensitivity
+                    if ANALYSIS_MODE_INDEX == 2 and three_band_detector is not None:
+                        # 3-Band: show SENSITIVITY (0-99, higher = more sensitive) = inverse of the
+                        # selected band's trigger threshold, scaled across its usable range.
+                        lo, hi = three_band_detector.TRIGGER_RANGE
+                        thr = three_band_detector.bands[THREEBAND_SELECTED].trigger_thresh
+                        sens = int(round((hi - thr) / max(1e-6, hi - lo) * 99))
+                        val_str = f"{max(0, min(99, sens))}"
+                    else:
+                        val_str = f"{int(_display_thresh * 99)}"
                 elif i == 2:  # Release or mode
                     if _home_enc4_alt:
                         val_str = RELEASE_MODES[RELEASE_MODE_INDEX]
@@ -5653,6 +6145,9 @@ class OledUI:
             elif tab == "Settings":
                 if i == 0:  # Gain (dB)
                     val_str = format_input_gain_display()
+                elif i >= 1 and ANALYSIS_MODE_INDEX == 2:
+                    # Presets (i==1) and AGC (i==2) are Classic-only; disabled in 3-Band.
+                    val_str = "--"
                 elif i == 1:  # Reset - show current preset name or countdown
                     # Check if "saved!" should be shown (progress=2.0 for 0.8s after save)
                     if _enc1_save_progress >= 2.0 and (time.time() - _enc1_save_complete) < 0.8:
@@ -5670,15 +6165,15 @@ class OledUI:
                         if _enc1_save_progress >= 2.0 and (time.time() - _enc1_save_complete) >= 0.8:
                             _enc1_save_progress = 0.0
                         val_str = DEFAULTS_MODES[DEFAULTS_MODE_INDEX]
-                else:  # Column 3 is blank (Detect mode locked to "old")
-                    val_str = ""
+                else:  # AGC On/Off
+                    val_str = "On" if AGC_ON else "Off"
             elif tab == "Setup":
                 if i == 0:  # Output
                     val_str = DMX_OUTPUT_MODES[DMX_OUTPUT_MODE]
                 elif i == 1:  # Channels
                     val_str = str(DMX_CHANNEL_COUNT)
-                else:  # Column 3 is blank
-                    val_str = ""
+                else:  # Analysis: Classic / 3-Band
+                    val_str = "3-Band" if ANALYSIS_MODE_INDEX == 2 else "Classic"
             else:
                 val_str = "--"
             
@@ -5858,15 +6353,21 @@ class OledUI:
             border_thickness = 1
             content_inset = 2  # 1px border + 1px gap
             
-            # Check if flash is active (time-based)
+            # Check if flash is active (time-based). Fires on the actual DMX trigger in every mode,
+            # including 3-Band (the selected band's trigger), matching Classic's full-screen stroke.
             flash_active = (time.time() - trigger_flash) < TRIGGER_FLASH_DURATION
-            
+
             if flash_active:
-                # Draw 1px border on all 4 sides
-                draw.line((0, 0, W - 1, 0), fill=OLED_WHITE)  # Top
-                draw.line((0, H - 1, W - 1, H - 1), fill=OLED_WHITE)  # Bottom
-                draw.line((0, 0, 0, H - 1), fill=OLED_WHITE)  # Left
-                draw.line((W - 1, 0, W - 1, H - 1), fill=OLED_WHITE)  # Right
+                # Draw 1px border on all 4 sides. Use a dimmer shade (not full white): at the
+                # panel's high contrast setting, a full-perimeter WHITE border spikes the SSD1322's
+                # current draw and its regulator briefly dims the rest of the screen ("clunky" dip).
+                # A grey stroke draws far less current, so the interior no longer dims. Tunable via
+                # TRIGGER_FLASH_LEVEL (0-255).
+                fc = _TRIGGER_FLASH_COLOR
+                draw.line((0, 0, W - 1, 0), fill=fc)  # Top
+                draw.line((0, H - 1, W - 1, H - 1), fill=fc)  # Bottom
+                draw.line((0, 0, 0, H - 1), fill=fc)  # Left
+                draw.line((W - 1, 0, W - 1, H - 1), fill=fc)  # Right
             
             # Content area inset by border + gap
             cx = content_inset  # Content x start
@@ -5887,25 +6388,26 @@ class OledUI:
             inner_y = cy + 1
             inner_w = half_width - 2
             inner_h = top_height - 2
-            meter_h = 6
-            gap_y = 1
-            fft_h = inner_h - meter_h - gap_y
-            fft_h = max(8, fft_h)
             if ANALYSIS_MODE_INDEX == 2 and three_band_detector is not None:
-                # 3-Band analysis: show the LOW/MID/HIGH view with the selected band highlighted.
-                self._draw_3band_vu(draw, inner_x, inner_y, inner_w, fft_h)
+                # 3-Band analysis: each LOW/MID/HIGH card has its own onset meter, so the shared
+                # env-meter strip below would be redundant — give the cards the full height instead.
+                self._draw_3band_vu(draw, inner_x, inner_y, inner_w, inner_h)
             else:
-                # Normal / Band analysis: standard FFT spectrum with the Q window.
+                # Normal / Band analysis: standard FFT spectrum with the Q window, plus the
+                # horizontal env-vs-threshold meter beneath it.
+                meter_h = 6
+                gap_y = 1
+                fft_h = max(8, inner_h - meter_h - gap_y)
                 self._draw_fft_spectrum(draw, inner_x, inner_y, inner_w, fft_h)
-            self._draw_env_meter_h(
-                draw,
-                inner_x,
-                inner_y + fft_h + gap_y,
-                inner_w,
-                meter_h,
-                live_band_env,
-                _effective_thresh,
-            )
+                self._draw_env_meter_h(
+                    draw,
+                    inner_x,
+                    inner_y + fft_h + gap_y,
+                    inner_w,
+                    meter_h,
+                    live_band_env,
+                    _effective_thresh,
+                )
 
             # Top-right: Submenu area (taller to fit 3 lines)
             submenu_x = cx + half_width + 2

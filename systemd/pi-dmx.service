@@ -20,6 +20,9 @@ Environment=DMX_UART_MIN_SLOTS=256
 Environment=AUDIO_INPUT_CHANNEL=left
 Environment=AUDIO_DEVICE_NAME=hifiberry
 Environment=DETECT_MODE=classic
+# Fixed per-frequency gain curve: boost rises with the selected band center so mids (snare)
+# / highs (hats) drive output as reliably as the kick — deterministic, no auto-locking.
+Environment=AGC_GAIN_MODE=scaled
 
 # --- OPTION B: USB Audio Interface ---
 # Environment=AUDIO_INPUT_CHANNEL=right

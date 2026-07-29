@@ -17,6 +17,14 @@ export AUDIO_DEVICE_NAME=hifiberry
 #   DETECT_MODE=manual ./run_dmx.sh
 export DETECT_MODE=${DETECT_MODE:-classic}
 
+# AGC: "scaled" = a fixed per-frequency gain curve that rises with the selected band center
+# (highs get more boost than lows), so a snare (mids) or hats (highs) drive output without
+# hand-tuning — and, unlike "calibrate", it never locks onto a wrong reference (e.g. a
+# kick-less section). Tune the tilt with FREQ_GAIN_SLOPE (0.5 ≈ pink). Alternatives:
+#   AGC_GAIN_MODE=calibrate ./run_dmx.sh   (auto-lock off in-band hits)
+#   AGC_GAIN_MODE=fixed ./run_dmx.sh       (one constant gain at all frequencies)
+export AGC_GAIN_MODE=${AGC_GAIN_MODE:-scaled}
+
 export NOISE_GATE_ON=0
 export ENABLE_TUI=1
 export DMX_BACKEND=uart
