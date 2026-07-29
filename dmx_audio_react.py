@@ -34,7 +34,7 @@
 #   AUDIO_DEVICE=1
 #   AUDIO_DEVICE_NAME="USB Audio"
 
-import os, sys, time, math, threading, curses, re, random, subprocess
+import os, sys, time, math, threading, queue, curses, re, random, subprocess
 
 # Set gpiozero to use RPi.GPIO backend (avoids conflict with RPi.GPIO pin setup)
 os.environ.setdefault('GPIOZERO_PIN_FACTORY', 'rpigpio')
@@ -135,14 +135,15 @@ _LOADED_ANALYSIS_MODE = 0
 # IMPORTANT: INPUT_GAIN_REF_DB anchors the visual "0 dB" in Settings. It does NOT
 # change the actual gain applied — it only shifts where the UI's "0 dB" sits — so
 # we can calibrate the operating point to show 0 dB without altering the signal.
-# Set to +24 dB: the HiFiBerry DAC+ADC line input is low (~-57 dBFS peak, fixed
-# hardware-mode ADC with no analog gain), so ~+24 dB absolute is the normal
-# operating point. Anchoring the reference here makes that read as 0 dB in the UI,
-# with the usual ±24 dB of headroom on either side.
-INPUT_GAIN_REF_DB = 18   # 0 dB display = +18 dB absolute (HiFiBerry line-level operating point)
+# Calibrated to +6 dB absolute: the earlier +18 dB assumption (from a supposedly
+# low HiFiBerry line input) ran the FFT far too hot in practice — a reasonable
+# spectrum needed ~+6 dB absolute (which read as -12 dB on the old scale). Anchoring
+# the reference here makes that good operating point read as 0 dB in the UI, and the
+# default now boots exactly at that 0 dB anchor, with ±24 dB of headroom on either side.
+INPUT_GAIN_REF_DB = 6    # 0 dB display = +6 dB absolute (measured good FFT operating point)
 INPUT_GAIN_MIN_DB = INPUT_GAIN_REF_DB - 24  # absolute floor (display: -24 dB)
 INPUT_GAIN_MAX_DB = INPUT_GAIN_REF_DB + 24  # absolute ceiling (display: +24 dB)
-INPUT_GAIN_DB = INPUT_GAIN_REF_DB - 3  # default boots 3 dB below the 0 dB anchor (input ran a bit hot)
+INPUT_GAIN_DB = INPUT_GAIN_REF_DB  # default boots at the 0 dB anchor (the calibrated good level)
 
 def load_defaults_mode():
     """Load defaults mode, DMX output mode, channel count, input gain, and any custom preset values from config."""
@@ -537,6 +538,16 @@ SR  = int(os.environ.get("AUDIO_SR", "48000").strip() or "48000")
 HOP = int(os.environ.get("AUDIO_HOP", "1024").strip() or "1024")  # Larger default for stability with OLED rendering
 _HANNING_WINDOW = None  # Pre-computed, initialized on first use
 
+# Audio capture queue: the RT callback enqueues raw blocks; a worker thread runs
+# the FFT/detection/light pipeline. Bounded so latency can't grow unbounded if the
+# worker stalls; ~16 blocks ≈ 340ms of cushion at 48k/1024. Health counters below
+# are surfaced by AUDIO_DEBUG (ovf = PortAudio xruns, qdrop = we dropped a stale
+# block, qdepth_max = deepest the queue ever got). All should stay ~0 / low.
+AUDIO_QUEUE_MAX = int(os.environ.get("AUDIO_QUEUE_MAX", "16").strip() or "16")
+_audio_overflow_count = 0
+_audio_qdrop_count = 0
+_audio_q_depth_max = 0
+
 # Detection / logic
 ENV_EMA       = 0.55   # Restored old-project value; smooth envelope without chatter
 AGC_ON        = True
@@ -554,6 +565,30 @@ NOISE_GATE_RMS = float(os.environ.get("NOISE_GATE_RMS", "0.0008"))
 # Cap the AGC's maximum gain (was 20×). 8× ≈ +18 dB still amplifies quiet music,
 # but won't pump silence to full scale.
 AGC_MAX_GAIN = float(os.environ.get("AGC_MAX_GAIN", "8.0"))
+# AGC "auto-calibrate, then hold": the AGC adapts only during a short window of
+# signal-present blocks, then FREEZES its gain. On four-on-the-floor the kicks are
+# the dominant energy, so a continuously-adapting AGC levels them down to target
+# within ~0.4s and the beat sinks under the threshold. Freezing the gain after a
+# brief calibration means a given kick always reads the same level, so a fixed
+# threshold stays valid. Re-calibrates on (re)start, on mode/state reset, and when
+# the targeted band (Freq/Q) changes. Set AGC_CALIBRATE_SECONDS=0 to disable
+# freezing (classic continuous-AGC behavior).
+AGC_CALIBRATE_SECONDS = float(os.environ.get("AGC_CALIBRATE_SECONDS", "2.5").strip() or "2.5")
+_agc_frozen = False
+_agc_calib_elapsed = 0.0   # accumulated seconds of signal-present adaptation
+_agc_calib_center = None   # band center the current gain was calibrated for
+_agc_calib_q = None        # band Q the current gain was calibrated for
+
+# "manual" detect mode: no AGC, no normalization. The band-envelope PEAK is mapped
+# through a FIXED dBFS window [MANUAL_FLOOR_DB, MANUAL_CEIL_DB] -> 0..1 meter, so a
+# given in-band signal level always lands at the same spot and a hand-set threshold
+# stays valid indefinitely. Set the operating level with INPUT_GAIN; widen/narrow the
+# useful range with the two dB bounds. FLOOR maps to meter 0 (also gates silence),
+# CEIL maps to meter 1. Defaults suit a narrow low band at line level.
+MANUAL_FLOOR_DB      = float(os.environ.get("MANUAL_FLOOR_DB", "-55").strip() or "-55")
+MANUAL_CEIL_DB       = float(os.environ.get("MANUAL_CEIL_DB", "-15").strip() or "-15")
+MANUAL_METER_RELEASE = float(os.environ.get("MANUAL_METER_RELEASE", "0.80").strip() or "0.80")  # meter/trigger fall smoothing (attack is instant)
+_manual_meter = 0.0
 REFRACTORY_MS = 110.0  # Match old project; refractory + edge detect handles double-fires
 # Hysteresis margins are no longer used by the new trigger modes (classic/compander/kick).
 # The compander/onset path naturally suppresses chatter; refractory + edge detect is enough.
@@ -655,7 +690,11 @@ BRIGHT_EXCESS_CURVE = 2.15
 # - "classic":   biquad bandpass + envelope + AGC + outer EMA (faithful old-project chain)
 # - "compander": biquad + envelope + adaptive compander (RMS floor / peak ceiling) + onset boost
 # - "kick":      cascaded biquads + faster envelope + decay-only floor + slope-weighted + peak-hold meter
-DETECT_MODES = ["classic", "compander", "kick", "old"]
+# - "manual":    biquad bandpass + envelope PEAK mapped to a FIXED dBFS scale. No AGC,
+#                no normalization — a given in-band level always reads the same, so you
+#                set the threshold by hand and it stays put. Level with INPUT_GAIN;
+#                shape the meter with MANUAL_FLOOR_DB / MANUAL_CEIL_DB.
+DETECT_MODES = ["classic", "compander", "kick", "old", "manual"]
 
 # Detection mode: honor the DETECT_MODE env var (classic|compander|kick|old).
 # Previously hard-locked to "old", whose 0.06 FFT-window gate silences low-level
@@ -1413,24 +1452,49 @@ CYCLE_TRIGGER_COUNT = 0
 CYCLE_PHASE         = 0
 CYCLE_AMBIENT_START = 0  # Timestamp when ambient phase started (for rnd/amb mode)
 
-# Cycles between modes: off disables cycling, x+1/rnd/rnd/amb enable it
-CYCLES_BETWEEN_MODES = ["off", "x+1", "rnd", "rnd/amb"]
+# Cycles between modes: off disables cycling, x+n/rnd/rnd/amb enable it
+CYCLES_BETWEEN_MODES = ["off", "x+n", "rnd", "rnd/amb"]
 CYCLES_BETWEEN_INDEX = 0  # Start with mode off
+
+# Saved cycle state (CYCLES_BETWEEN_INDEX, CYCLE_STEPS_INDEX) captured when the
+# AMBIENT preset forces cycling off, so it can be restored on leaving AMBIENT.
+_cycle_state_before_ambient = None
 
 # Number of presets (can be expanded later)
 NUM_PRESETS = 6
 
+# x+n offset: swap between base and base+n over the non-ambient chain (1..5).
+# Editable by holding the enc5 switch and turning. Runtime-only (not persisted).
+CYCLE_OFFSET_N     = 1
+CYCLE_OFFSET_N_MAX = (NUM_PRESETS - 1) - 1  # 5 non-ambient presets; +5 would wrap to self
+
 def program_pair_for_base(base: int):
-    """Get the pair of programs for cycling: current and next (wrapping, excluding AMBIENT)."""
+    """Get the pair of programs for cycling: base and base+n (wrapping, excluding AMBIENT)."""
     # base is 1-indexed (1 to NUM_PRESETS)
-    # Returns (current, next) where next wraps around
+    # Returns (current, neighbor) where neighbor = base+n wrapped over the non-ambient 1..5 chain
     # Note: AMBIENT (6) should never reach here since beats are disabled for it
     if base == 6:  # AMBIENT - no cycling (fallback)
         return (base, base)
-    elif base == 5:  # RANDOM wraps to ALL
-        return (base, 1)
-    else:  # 1-4 cycle to next
-        return (base, base + 1)
+    neighbor = ((base - 1 + CYCLE_OFFSET_N) % 5) + 1  # wrap over non-ambient 1..5
+    return (base, neighbor)
+
+def cycle_mode_label(mode: str) -> str:
+    """Display string for a cycle mode; x+n shows the live offset (e.g. 'x+2')."""
+    if mode == "x+n":
+        return f"x+{CYCLE_OFFSET_N}"
+    return mode
+
+def _adjust_cycle_offset_n(direction):
+    """Edit the x+n offset (held enc5 switch + turn). Auto-enables x+n if off."""
+    global CYCLE_OFFSET_N, CYCLES_BETWEEN_INDEX, CYCLE_PHASE, CYCLE_TRIGGER_COUNT
+    # AMBIENT (6) has no cycling: still update the value, but don't force x+n on
+    if BASE_PROGRAM != 6 and CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX] != "x+n":
+        # Auto-enable x+n mode (keep existing beat count)
+        CYCLES_BETWEEN_INDEX = CYCLES_BETWEEN_MODES.index("x+n")
+        CYCLE_PHASE = 0
+        CYCLE_TRIGGER_COUNT = 0
+    CYCLE_OFFSET_N = max(1, min(CYCLE_OFFSET_N_MAX, CYCLE_OFFSET_N + direction))
+    ui_flash(f"x+{CYCLE_OFFSET_N}", 0.5)
 
 def set_cycle_steps(steps: int):
     global CYCLE_STEPS, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
@@ -1904,13 +1968,42 @@ OLD_AGC_MAX_GAIN     = 20.0
 _old_classic_abs_ema = 0.0
 _old_agc             = None  # lazily constructed on first use to honor module-level Agc
 
-# "Band" analysis mode: spectral-flux onset within the selected Q window.
-# Source is `q_flux_mean` (mean half-wave-rectified spectral flux over the FFT bands inside
-# band.center ± bandwidth/2). We normalize it against a slowly-decaying running max — like
-# the compander/kick onset stages — so the 0..1 score is consistent across input levels.
-FLUX_BAND_LEVEL_BLEND = float(os.environ.get("FLUX_BAND_LEVEL_BLEND", "0.25"))  # add a little level so sustained energy still reads
-_flux_band_smax     = 0.01   # decaying max of q_flux_mean (onset normalizer)
-_flux_band_meter_ema = 0.0   # smoothed meter for display
+# "Band" analysis mode: band-energy kick detector on the selected FFT Q window.
+#
+# Workflow this serves: the user picks a frequency range on the FFT (Freq/Q encoders =
+# band.center / band.q, typically low end for kicks) and sets one threshold on the band-env
+# meter. The meter/threshold must then read CONSISTENTLY — a given threshold means the same
+# "how strong a hit" regardless of overall level — and fire once per kick, no misfires in
+# quiet passages, no double-hits.
+#
+# The old flux approach normalized spectral *change* against a running max, so every prominent
+# onset landed near the top (pinned) and the threshold never meant a consistent thing. This is
+# the proven kick-detector recipe (mirrors _trigger_kick) applied to the FFT window instead:
+#   1. e = mean FFT level in the Q window (display_mean_in_q).
+#   2. Learn a noise FLOOR from e, but ONLY while the band is steady/decaying (slope <= 0),
+#      so kicks themselves don't drag the floor up. Track a decaying PEAK as the ceiling.
+#   3. norm = where e sits in [floor, ceiling] -> 0 in quiet, 1 at a recent-peak hit.
+#      This is what makes the threshold consistent: it's relative to the band's own learned
+#      dynamic range, not the raw signal level.
+#   4. onset = positive slope of e, normalized against its own decaying max -> the attack.
+#   5. score = weighted blend, onset-dominated (kicks are transients). In quiet, e~floor and
+#      slope~0 -> score~0, so it can't misfire; edge-detect + REFRACTORY_MS kill double-hits.
+FB_FLOOR_DECAY  = float(os.environ.get("FB_FLOOR_DECAY", "0.99"))   # floor EMA on decays (higher = slower/steadier floor)
+FB_PEAK_DECAY   = float(os.environ.get("FB_PEAK_DECAY", "0.992"))   # ceiling decay/hop (higher = holds peaks longer)
+FB_SMAX_DECAY   = float(os.environ.get("FB_SMAX_DECAY", "0.99"))    # onset-normalizer max decay/hop
+FB_SMAX_MIN     = float(os.environ.get("FB_SMAX_MIN", "0.05"))      # floor on onset normalizer so quiet-noise wiggles can't blow up into false onsets
+FB_ONSET_WEIGHT = float(os.environ.get("FB_ONSET_WEIGHT", "0.6"))   # score = w*onset + (1-w)*norm; raise = more attack-driven
+FB_FLOOR_MIN    = float(os.environ.get("FB_FLOOR_MIN", "0.02"))     # absolute floor so silence never normalizes up
+FB_MIN_RANGE    = float(os.environ.get("FB_MIN_RANGE", "0.08"))     # min [floor,ceiling] span (avoids div blow-up when quiet)
+FB_METER_ATTACK = float(os.environ.get("FB_METER_ATTACK", "0.6"))   # meter rise smoothing (higher = snappier)
+FB_METER_DECAY  = float(os.environ.get("FB_METER_DECAY", "0.85"))   # meter fall smoothing (higher = slower/steadier fall)
+_fb_floor      = 0.02
+_fb_peak       = 0.10
+_fb_prev_e     = 0.0
+_fb_smax       = 0.01
+# Back-compat aliases (referenced by _reset_trigger_state); the flux-specific state is gone.
+_flux_band_smax     = 0.01
+_flux_band_meter_ema = 0.0
 
 
 def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
@@ -1944,7 +2037,32 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
         lbe = min(1.0, float(classic_abs_ema) / denom)
         return lbe, lbe
 
-    g_agc = agc_obj.update(e_mean_raw) if AGC_ON else 1.0
+    # AGC: auto-calibrate then hold. Only reaches here on signal-present blocks
+    # (silence returns early via the noise gate above), so the calibration window
+    # counts real signal and startup silence can't burn it or inflate the gain.
+    global _agc_frozen, _agc_calib_elapsed, _agc_calib_center, _agc_calib_q
+    if AGC_ON:
+        if AGC_CALIBRATE_SECONDS <= 0.0:
+            # Freezing disabled: classic continuous AGC.
+            g_agc = agc_obj.update(e_mean_raw)
+        else:
+            # Re-calibrate if the targeted band moved — the frozen gain was tuned
+            # for the old band's energy and would misread a new Freq/Q selection.
+            if _agc_calib_center != band.center or _agc_calib_q != band.q:
+                _agc_calib_center = band.center
+                _agc_calib_q = band.q
+                _agc_frozen = False
+                _agc_calib_elapsed = 0.0
+            if _agc_frozen:
+                g_agc = agc_obj.gain  # hold the calibrated gain — consistent per kick
+            else:
+                g_agc = agc_obj.update(e_mean_raw)
+                _agc_calib_elapsed += (HOP / SR)
+                if _agc_calib_elapsed >= AGC_CALIBRATE_SECONDS:
+                    _agc_frozen = True
+                    ui_flash("AGC locked", 0.8)
+    else:
+        g_agc = 1.0
     wgt   = math.sqrt(max(1.0, band.center / 100.0)) if WEIGHTING_ON else 1.0
     e_scaled = e_env * (g_agc * wgt)
 
@@ -1958,6 +2076,34 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
     # Map AGC-scaled envelope to 0..1 (CLASSIC_UI_SCALE=1.0 lets it reach 1.0)
     lbe = min(1.0, float(va) / denom)
     return lbe, lbe
+
+
+def _trigger_manual(x_block, bp_obj, envd_obj):
+    """No-AGC 'manual' detector — the plain "signal peak in the band env" version.
+
+    Bandpass to the selected Q window -> envelope follower -> take the block PEAK ->
+    map straight through a FIXED dBFS window to a 0..1 meter. There is no AGC and no
+    running normalization, so the same in-band level always reads the same meter
+    position: you set the threshold by hand once and it stays valid. Calibrate the
+    operating level with INPUT_GAIN; shape the range with MANUAL_FLOOR_DB/CEIL_DB.
+    The fixed dB floor also acts as the silence gate (quiet -> 0). Meter attack is
+    instant (never misses a transient) with an eased fall so the bar isn't jittery;
+    meter and trigger score are the same value, so what you see is what fires.
+    Returns: (meter, trigger_score) — identical here.
+    """
+    global _manual_meter
+    bp_obj.set_params(band.center, band.q)
+    y_bp = bp_obj.process(x_block)
+    e_env = envd_obj.process(y_bp)
+    e_peak = float(np.max(e_env)) if len(e_env) else 0.0
+    db = 20.0 * math.log10(e_peak + 1e-9)
+    level = (db - MANUAL_FLOOR_DB) / max(1e-6, MANUAL_CEIL_DB - MANUAL_FLOOR_DB)
+    level = max(0.0, min(1.0, level))
+    if level >= _manual_meter:
+        _manual_meter = level  # instant attack: catch the kick peak
+    else:
+        _manual_meter = MANUAL_METER_RELEASE * _manual_meter + (1.0 - MANUAL_METER_RELEASE) * level
+    return _manual_meter, _manual_meter
 
 
 def _trigger_compander(x_block, bp_obj, envd_obj):
@@ -2092,24 +2238,51 @@ def _trigger_old(display_mean_in_q):
 
 
 def _trigger_flux_band(q_flux_mean, display_mean_in_q):
-    """"Band" analysis mode — spectral-flux onset within the selected Q window.
+    """"Band" analysis mode — band-energy kick detector on the selected FFT Q window.
 
-    Source: `q_flux_mean` — mean half-wave-rectified spectral flux across the FFT bands
-    inside band.center ± bandwidth/2 (the paper's onset descriptor, restricted to the
-    user-selected frequency window). Normalized against a decaying running max so the score
-    is level-independent, then a little steady level (`display_mean_in_q`) is blended in so
-    sustained tones still register.
+    Source: `display_mean_in_q` — mean FFT level inside band.center ± bandwidth/2 (the bars
+    highlighted on the spectrum). We track a noise FLOOR learned only while the band is steady/
+    decaying and a decaying PEAK ceiling, normalize the level into [floor, ceiling], and blend
+    that with a rising-slope onset. The result reads consistently against a fixed threshold:
+    quiet -> ~0 (can't misfire), a recent-peak hit -> ~1. See the block comment above for the
+    rationale (this mirrors the proven _trigger_kick recipe, driven from the FFT window).
+    `q_flux_mean` is accepted for signature compatibility but no longer used.
     Returns: (meter, trigger_score) — score drives the trigger, meter drives the display.
     """
-    global _flux_band_smax, _flux_band_meter_ema
-    flux = max(0.0, float(q_flux_mean))
-    # Decaying running max for onset normalization (same idea as the compander onset stage).
-    _flux_band_smax = max(_flux_band_smax * 0.995, flux)
-    onset = flux / max(_flux_band_smax, 1e-6)
-    onset = max(0.0, min(1.0, onset))
-    level = max(0.0, min(1.0, float(display_mean_in_q)))
-    score = max(0.0, min(1.0, onset + FLUX_BAND_LEVEL_BLEND * level))
-    _flux_band_meter_ema = ENV_EMA * _flux_band_meter_ema + (1.0 - ENV_EMA) * score
+    global _fb_floor, _fb_peak, _fb_prev_e, _fb_smax, _flux_band_meter_ema
+    e = max(0.0, min(1.0, float(display_mean_in_q)))
+
+    # Rising-edge slope of the band level (the kick attack).
+    slope = e - _fb_prev_e
+    _fb_prev_e = e
+
+    # Learn the floor ONLY on decays/steady frames so kicks don't drag it up.
+    if slope <= 0.0:
+        _fb_floor = FB_FLOOR_DECAY * _fb_floor + (1.0 - FB_FLOOR_DECAY) * e
+    # Ceiling tracks recent peaks with slow decay -> a dynamic top of range.
+    _fb_peak = max(_fb_peak * FB_PEAK_DECAY, e)
+
+    floor   = max(FB_FLOOR_MIN, _fb_floor)
+    ceiling = max(_fb_peak, floor + FB_MIN_RANGE)
+    norm    = (e - floor) / (ceiling - floor)
+    norm    = max(0.0, min(1.0, norm))
+
+    # Onset = positive slope normalized against its own decaying max (attack sharpness).
+    pos_slope = max(0.0, slope)
+    _fb_smax  = max(_fb_smax * FB_SMAX_DECAY, pos_slope, FB_SMAX_MIN)
+    onset     = pos_slope / max(_fb_smax, 1e-6)
+    onset     = max(0.0, min(1.0, onset))
+
+    # Onset-dominated score (kicks are transients), gated by level so a rise from near the
+    # floor still needs real energy above the floor to score.
+    score = FB_ONSET_WEIGHT * onset + (1.0 - FB_ONSET_WEIGHT) * norm
+    score = max(0.0, min(1.0, score)) * (0.5 + 0.5 * norm)  # level gate: halve score near floor
+
+    # Asymmetric meter smoothing: snappy rise so kicks read, slower fall so the bar is legible.
+    if score > _flux_band_meter_ema:
+        _flux_band_meter_ema = FB_METER_ATTACK * score + (1.0 - FB_METER_ATTACK) * _flux_band_meter_ema
+    else:
+        _flux_band_meter_ema = FB_METER_DECAY * _flux_band_meter_ema + (1.0 - FB_METER_DECAY) * score
     return _flux_band_meter_ema, score
 
 
@@ -2141,8 +2314,25 @@ def _reset_trigger_state():
     global classic_abs_ema
     global _old_classic_abs_ema, _old_agc, _old_fft_ema
     global _flux_band_smax, _flux_band_meter_ema
+    global _fb_floor, _fb_peak, _fb_prev_e, _fb_smax
+    global _manual_meter
+    global _agc_frozen, _agc_calib_elapsed, _agc_calib_center, _agc_calib_q
+    _manual_meter = 0.0
+    # Re-run AGC auto-calibration and drop the held gain back to unity.
+    _agc_frozen = False
+    _agc_calib_elapsed = 0.0
+    _agc_calib_center = None
+    _agc_calib_q = None
+    try:
+        agc.gain = 1.0
+    except NameError:
+        pass
     _flux_band_smax = 0.01
     _flux_band_meter_ema = 0.0
+    _fb_floor = 0.02
+    _fb_peak = 0.10
+    _fb_prev_e = 0.0
+    _fb_smax = 0.01
     _comp_running_rms = 0.001
     _comp_running_peak = 0.05
     _comp_running_smax = 0.01
@@ -3170,6 +3360,7 @@ def _handle_submenu_value_change(direction):
     """Handle value changes when encoder 1 is in editing mode for submenu columns."""
     global BASE_PROGRAM, CYCLES_BETWEEN_INDEX, CYCLES_BETWEEN, CYCLE_TRIGGER_COUNT, CYCLE_PHASE
     global INPUT_GAIN_DB, DMX_OUTPUT_MODE, DMX_CHANNEL_COUNT
+    global CYCLE_STEPS_INDEX, CYCLE_STEPS, _cycle_state_before_ambient
     
     tab = SUBMENU_TABS[submenu_tab]
     col = submenu_column
@@ -3177,15 +3368,24 @@ def _handle_submenu_value_change(direction):
     if tab == "Modes":
         if col == 0:
             # Preset selection (1-6)
+            prev_program = BASE_PROGRAM
             BASE_PROGRAM = max(1, min(6, BASE_PROGRAM + direction))
             CYCLE_TRIGGER_COUNT = 0
             CYCLE_PHASE = 0
-            # If AMBIENT preset selected, force mode to "off"
-            if BASE_PROGRAM == 6:
+            if BASE_PROGRAM == 6 and prev_program != 6:
+                # Entering AMBIENT: remember cycle mode + beats, then force off
+                _cycle_state_before_ambient = (CYCLES_BETWEEN_INDEX, CYCLE_STEPS_INDEX)
                 CYCLES_BETWEEN_INDEX = 0  # "off"
+            elif BASE_PROGRAM != 6 and prev_program == 6 and _cycle_state_before_ambient is not None:
+                # Leaving AMBIENT: restore the remembered cycle mode + beats
+                CYCLES_BETWEEN_INDEX, CYCLE_STEPS_INDEX = _cycle_state_before_ambient
+                CYCLE_STEPS = CYCLE_STEPS_OPTIONS[CYCLE_STEPS_INDEX]
+                _cycle_state_before_ambient = None
             ui_flash(f"Preset: {PROGRAM_NAMES[BASE_PROGRAM-1]}", 0.5)
         elif col == 1:
-            # Cycle mode
+            # Cycle mode — disabled on AMBIENT (cycling doesn't apply)
+            if BASE_PROGRAM == 6:
+                return
             CYCLES_BETWEEN_INDEX = max(0, min(len(CYCLES_BETWEEN_MODES) - 1, CYCLES_BETWEEN_INDEX + direction))
             # Reset cycle state when changing modes
             CYCLE_PHASE = 0
@@ -3194,14 +3394,15 @@ def _handle_submenu_value_change(direction):
             new_mode = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
             if new_mode in ("rnd/amb", "rnd") and BASE_PROGRAM == 6:
                 BASE_PROGRAM = random.randint(1, 5)
-            ui_flash(f"Cycle: {new_mode}", 0.5)
+            ui_flash(f"Cycle: {cycle_mode_label(new_mode)}", 0.5)
         elif col == 2:
-            # Beat cycles
-            global CYCLE_STEPS_INDEX, CYCLE_STEPS
+            # Beat cycles — disabled on AMBIENT (cycling doesn't apply)
+            if BASE_PROGRAM == 6:
+                return
             # If mode is "off", scrolling right enables x+1 at lowest beat value
             if CYCLES_BETWEEN_INDEX == 0:  # "off"
                 if direction > 0:  # Scrolling right - enable cycling at 4
-                    CYCLES_BETWEEN_INDEX = 1  # "x+1"
+                    CYCLES_BETWEEN_INDEX = CYCLES_BETWEEN_MODES.index("x+n")
                     CYCLE_STEPS_INDEX = 0  # Start at 4
                     CYCLE_STEPS = CYCLE_STEPS_OPTIONS[CYCLE_STEPS_INDEX]
                     CYCLE_PHASE = 0
@@ -3408,15 +3609,20 @@ def encoder_reader():
                 _enc_last_sw[3] = enc4_sw
 
                 # ===== Encoder 5 - Edit highlighted section value =====
-                direction = _read_encoder_quadrature(4, ENC5_CLK, ENC5_DT)
-                if direction != 0:
-                    _handle_submenu_value_change(-direction)  # negate: same hw inversion as enc1–4
-
-                # Enc5 switch (GPIO17): short press = cycle tabs, long press = save preset
+                # Read the switch first so a held switch can reroute the turn to edit x+n
                 try:
                     enc5_sw = GPIO.input(ENC5_SW_GPIO)
                 except Exception:
                     enc5_sw = 1
+
+                direction = _read_encoder_quadrature(4, ENC5_CLK, ENC5_DT)
+                if direction != 0:
+                    if enc5_sw == 0 and SUBMENU_TABS[submenu_tab] == "Modes":
+                        _adjust_cycle_offset_n(-direction)        # held: edit x+n (same hw inversion)
+                    else:
+                        _handle_submenu_value_change(-direction)  # negate: same hw inversion as enc1–4
+
+                # Enc5 switch (GPIO17): held+turn in Modes edits x+n; hold in Settings/Reset = save preset
                 global _enc1_press_time, _enc1_save_progress, _enc1_save_complete
                 if _enc_awaiting_release[4]:
                     if enc5_sw == 1:
@@ -3662,7 +3868,38 @@ def audio_loop():
     _adapt_armed = True
     _q_band_smooth = 0.0
 
+    # Decouple audio capture from processing. The PortAudio callback runs in a
+    # real-time thread on a hard deadline (~HOP/SR ms per block). If it does the
+    # full FFT/detection/light pipeline inline, any GIL contention from the OLED
+    # render / encoder-I2C thread (or a GC pause) that pushes past that deadline
+    # makes ALSA drop an input block — and a kick transient in that block is lost,
+    # which shows up as a random missed hit / "stall". So the callback now does the
+    # bare minimum (hand the block to a queue) and a worker thread does the work.
+    audio_q = queue.Queue(maxsize=AUDIO_QUEUE_MAX)
+
     def cb(indata, frames, time_info, status):
+        # Real-time thread: keep this trivial so PortAudio never overruns.
+        global _audio_overflow_count, _audio_qdrop_count, _audio_q_depth_max
+        if status:
+            _audio_overflow_count += 1  # xrun/overflow reported by PortAudio
+        if not RUNNING:
+            return
+        try:
+            audio_q.put_nowait(indata.copy())
+        except queue.Full:
+            # Worker briefly fell behind (e.g. long GC). Drop the OLDEST block and
+            # keep the newest so detection latency stays bounded instead of growing.
+            try:
+                audio_q.get_nowait()
+                audio_q.put_nowait(indata.copy())
+            except queue.Empty:
+                pass
+            _audio_qdrop_count += 1
+        depth = audio_q.qsize()
+        if depth > _audio_q_depth_max:
+            _audio_q_depth_max = depth
+
+    def process_block(indata):
         nonlocal was_above, _hysteresis_armed, _adapt_armed, _q_band_smooth
         global live_band_env, live_threshold, input_rms
         global last_trigger_ts, chase_idx, group34_phase, group12_phase
@@ -3678,9 +3915,6 @@ def audio_loop():
         global _fft_hp_y, _fft_hp_x_prev
         global _fft_low_smooth
         global classic_abs_ema
-
-        if not RUNNING:
-            return
 
         # Mono vs stereo — channel selectable via AUDIO_INPUT_CHANNEL (see module constant)
         if indata.shape[1] >= 2:
@@ -3714,7 +3948,7 @@ def audio_loop():
                     f"[AUDIO_DBG] ch={AUDIO_INPUT_CHANNEL_MODE} "
                     f"raw_L={raw_l_db:.1f}dB x_peak={x_peak_db:.1f}dB "
                     f"gain={INPUT_GAIN_DB}dB indata.shape={indata.shape} "
-                    f"status={status}",
+                    f"ovf={_audio_overflow_count} qdrop={_audio_qdrop_count} qdepth_max={_audio_q_depth_max}",
                     flush=True,
                 )
 
@@ -3937,6 +4171,10 @@ def audio_loop():
                 # on the visible spectrum. Out-of-band content cannot drive the trigger.
                 live_band_env, trigger_score = _trigger_old(display_mean_in_q)
                 effective_thresh = band.thresh
+            elif detect_mode == "manual":
+                # No-AGC fixed-scale band-envelope peak; threshold set by hand.
+                live_band_env, trigger_score = _trigger_manual(x, bp, envd)
+                effective_thresh = band.thresh
             else:  # "classic" (default / index 0)
                 live_band_env, trigger_score = _trigger_classic(x, bp, envd, agc)
                 effective_thresh = band.thresh
@@ -3953,8 +4191,8 @@ def audio_loop():
         can_fire = ((now - last_trigger_ts)*1000.0 >= REFRACTORY_MS)
 
         current_mode = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
-        if current_mode == "x+1":
-            # x+1 mode: toggle between base and neighbor preset
+        if current_mode == "x+n":
+            # x+n mode: toggle between base and neighbor preset
             p_base, p_neighbor = program_pair_for_base(BASE_PROGRAM)
             active_prog = p_base if CYCLE_PHASE == 0 else p_neighbor
         elif current_mode == "rnd":
@@ -4087,7 +4325,7 @@ def audio_loop():
             # Note: active_prog == 6 (AMBIENT) doesn't trigger here - it's handled separately
 
             # Count beats and cycle presets based on mode
-            if current_mode == "x+1":
+            if current_mode == "x+n":
                 CYCLE_TRIGGER_COUNT += 1
                 if CYCLE_TRIGGER_COUNT >= CYCLE_STEPS:
                     CYCLE_TRIGGER_COUNT = 0
@@ -4122,6 +4360,22 @@ def audio_loop():
         else:
             send_dmx(update_lights(frame_dt_ms))
         was_above = above
+
+    def audio_worker():
+        # Pulls captured blocks off the queue and runs the full pipeline. Runs
+        # outside the RT audio thread, so if it's briefly starved by the OLED/
+        # encoder thread it just catches up from the queue — no audio is dropped.
+        while not STOP_THREADS:
+            try:
+                block = audio_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                process_block(block)
+            except Exception as e:
+                print(f"[AUDIO_WORKER][ERR] {e}", file=sys.stderr, flush=True)
+
+    threading.Thread(target=audio_worker, daemon=True).start()
 
     # Try to open audio stream, falling back to 1 channel if multi-channel fails
     stream_opened = False
@@ -4730,7 +4984,7 @@ class OledUI:
         """Draw program number and brightness percentage."""
         # Program number - show cycling state if active
         current_mode = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
-        if current_mode == "x+1" and CYCLE_PHASE == 1:
+        if current_mode == "x+n" and CYCLE_PHASE == 1:
             _, neighbor = program_pair_for_base(BASE_PROGRAM)
             draw.text((x, y), f"(P{neighbor})", font=self._font_small, fill=OLED_WHITE)
         elif current_mode == "rnd/amb" and CYCLE_PHASE == 1:
@@ -5006,8 +5260,8 @@ class OledUI:
             elif page_name == "PRE":
                 if i == 0:  # Preset - show preset name
                     current_mode = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
-                    if current_mode == "x+1" and CYCLE_PHASE == 1 and BASE_PROGRAM != 6:
-                        # Show neighbor preset in parentheses when cycling (only for x+1 mode)
+                    if current_mode == "x+n" and CYCLE_PHASE == 1 and BASE_PROGRAM != 6:
+                        # Show neighbor preset in parentheses when cycling (only for x+n mode)
                         _, neighbor = program_pair_for_base(BASE_PROGRAM)
                         val_str = f"({PROGRAM_NAMES[neighbor - 1]})"
                     elif current_mode == "rnd/amb" and CYCLE_PHASE == 1:
@@ -5015,8 +5269,11 @@ class OledUI:
                         val_str = "[AMB]"
                     else:
                         val_str = PROGRAM_NAMES[BASE_PROGRAM - 1]
-                elif i == 1:  # Mode - Cycles Between mode
-                    val_str = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
+                elif i == 1:  # Mode - Cycles Between mode ("--" on AMBIENT)
+                    if BASE_PROGRAM == 6:
+                        val_str = "--"
+                    else:
+                        val_str = cycle_mode_label(CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX])
                 else:  # Beat Cycles - show value or -- if mode is off
                     current_mode = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
                     if BASE_PROGRAM == 6 or current_mode == "off":
@@ -5255,8 +5512,8 @@ class OledUI:
             if tab == "Modes":
                 if i == 0:  # Preset - show cycling state with parentheses
                     current_mode = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
-                    if current_mode == "x+1" and CYCLE_PHASE == 1 and BASE_PROGRAM != 6:
-                        # Show neighbor preset in parentheses when in x+1 neighbor phase
+                    if current_mode == "x+n" and CYCLE_PHASE == 1 and BASE_PROGRAM != 6:
+                        # Show neighbor preset in parentheses when in x+n neighbor phase
                         _, neighbor = program_pair_for_base(BASE_PROGRAM)
                         val_str = f"({PROGRAM_NAMES[neighbor - 1]})"
                     elif current_mode == "rnd/amb" and CYCLE_PHASE == 1:
@@ -5265,10 +5522,13 @@ class OledUI:
                     else:
                         # Normal: show base preset name
                         val_str = PROGRAM_NAMES[BASE_PROGRAM - 1]
-                elif i == 1:  # Mode
-                    val_str = CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX]
+                elif i == 1:  # Mode — "--" on AMBIENT (cycling disabled)
+                    if BASE_PROGRAM == 6:
+                        val_str = "--"
+                    else:
+                        val_str = cycle_mode_label(CYCLES_BETWEEN_MODES[CYCLES_BETWEEN_INDEX])
                 else:  # Beats
-                    if CYCLES_BETWEEN_INDEX == 0:
+                    if BASE_PROGRAM == 6 or CYCLES_BETWEEN_INDEX == 0:
                         val_str = "--"
                     else:
                         val_str = f"{CYCLE_STEPS_OPTIONS[CYCLE_STEPS_INDEX]}"

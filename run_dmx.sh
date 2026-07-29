@@ -13,7 +13,9 @@ export AUDIO_INPUT_CHANNEL=left
 export DISABLE_I2S_ENCODERS=1
 export AUDIO_DEVICE_NAME=hifiberry
 
-export DETECT_MODE=classic
+# Detection mode: classic|compander|kick|old|manual. Override to A/B, e.g.:
+#   DETECT_MODE=manual ./run_dmx.sh
+export DETECT_MODE=${DETECT_MODE:-classic}
 
 export NOISE_GATE_ON=0
 export ENABLE_TUI=1
