@@ -3892,7 +3892,13 @@ def encoder_reader():
             except RuntimeError:
                 break
 
-            time.sleep(0.002)  # 2ms polling - matches test script rate for reliable fast-spin
+            # 5ms polling (200 Hz). Each iteration does a blocking I2C read of the
+            # MCP23017 (_mcp_snapshot_update), which holds the GIL for the transaction.
+            # At 500 Hz that background load starved the audio worker (queued blocks
+            # dropped -> missed/late beats). The quadrature decoder is explicitly
+            # designed to tolerate a 5ms poller (see _read_encoder_quadrature docstring),
+            # so 200 Hz is plenty for hand-turned encoders while ~halving I2C GIL load.
+            time.sleep(0.005)
     finally:
         pass
 
