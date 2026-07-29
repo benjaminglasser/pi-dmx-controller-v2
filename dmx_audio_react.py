@@ -566,18 +566,31 @@ NOISE_GATE_RMS = float(os.environ.get("NOISE_GATE_RMS", "0.0008"))
 # but won't pump silence to full scale.
 AGC_MAX_GAIN = float(os.environ.get("AGC_MAX_GAIN", "8.0"))
 # AGC "auto-calibrate, then hold": the AGC adapts only during a short window of
-# signal-present blocks, then FREEZES its gain. On four-on-the-floor the kicks are
-# the dominant energy, so a continuously-adapting AGC levels them down to target
-# within ~0.4s and the beat sinks under the threshold. Freezing the gain after a
-# brief calibration means a given kick always reads the same level, so a fixed
-# threshold stays valid. Re-calibrates on (re)start, on mode/state reset, and when
-# the targeted band (Freq/Q) changes. Set AGC_CALIBRATE_SECONDS=0 to disable
-# freezing (classic continuous-AGC behavior).
-AGC_CALIBRATE_SECONDS = float(os.environ.get("AGC_CALIBRATE_SECONDS", "2.5").strip() or "2.5")
+# signal-present blocks, then FREEZES its gain, so a given hit always reads the
+# same level and a fixed threshold stays valid.
+#
+# Crucially, calibration keys ONLY on transient PEAKS that come through the band —
+# not the raw in-band level. A block counts as a "hit" when the band-envelope peak
+# spikes above its own slow moving average (CLASSIC_ONSET_RATIO) and clears the
+# noise floor (CLASSIC_ONSET_MIN_MULT × gate). The AGC calibrates off the first
+# AGC_CALIBRATE_HITS such hits (gain set so the average hit maps to AGC_TARGET),
+# then freezes. This is what makes it robust: if the wrong content is playing while
+# it would otherwise calibrate (strings/pad/drone, or a bassline with no kick, esp.
+# with the band parked on the low end), there are no in-band transient peaks, so it
+# simply doesn't calibrate/lock — it waits for real hits. Works for kick/clap/hat in
+# whatever band is selected. Re-calibrates on restart, mode/state reset, and Freq/Q
+# change. AGC_CALIBRATE_HITS=0 restores continuous AGC (no freeze).
+AGC_CALIBRATE_HITS     = int(os.environ.get("AGC_CALIBRATE_HITS", "8").strip() or "8")
+CLASSIC_ONSET_RATIO    = float(os.environ.get("CLASSIC_ONSET_RATIO", "1.6").strip() or "1.6")     # peak must exceed this × its moving avg to count as a hit
+CLASSIC_ONSET_MIN_MULT = float(os.environ.get("CLASSIC_ONSET_MIN_MULT", "3.0").strip() or "3.0")  # …and exceed NOISE_GATE_RMS × this (absolute floor for a hit)
+CLASSIC_PEAK_AVG_COEF  = float(os.environ.get("CLASSIC_PEAK_AVG_COEF", "0.98").strip() or "0.98")  # smoothing of the moving peak reference (~1s)
 _agc_frozen = False
-_agc_calib_elapsed = 0.0   # accumulated seconds of signal-present adaptation
 _agc_calib_center = None   # band center the current gain was calibrated for
 _agc_calib_q = None        # band Q the current gain was calibrated for
+_classic_peak_avg = 0.0    # slow moving reference of the band-env peak (onset test)
+_classic_prev_peak = 0.0   # previous block's band-env peak (rising-edge test)
+_classic_calib_hits = 0    # in-band transient hits counted toward calibration
+_classic_calib_sum = 0.0   # running sum of hit levels (direct gain calibration)
 
 # "manual" detect mode: no AGC, no normalization. The band-envelope PEAK is mapped
 # through a FIXED dBFS window [MANUAL_FLOOR_DB, MANUAL_CEIL_DB] -> 0..1 meter, so a
@@ -2037,32 +2050,59 @@ def _trigger_classic(x_block, bp_obj, envd_obj, agc_obj):
         lbe = min(1.0, float(classic_abs_ema) / denom)
         return lbe, lbe
 
-    # AGC: auto-calibrate then hold. Only reaches here on signal-present blocks
-    # (silence returns early via the noise gate above), so the calibration window
-    # counts real signal and startup silence can't burn it or inflate the gain.
-    global _agc_frozen, _agc_calib_elapsed, _agc_calib_center, _agc_calib_q
-    if AGC_ON:
-        if AGC_CALIBRATE_SECONDS <= 0.0:
-            # Freezing disabled: classic continuous AGC.
-            g_agc = agc_obj.update(e_mean_raw)
-        else:
-            # Re-calibrate if the targeted band moved — the frozen gain was tuned
-            # for the old band's energy and would misread a new Freq/Q selection.
-            if _agc_calib_center != band.center or _agc_calib_q != band.q:
-                _agc_calib_center = band.center
-                _agc_calib_q = band.q
-                _agc_frozen = False
-                _agc_calib_elapsed = 0.0
-            if _agc_frozen:
-                g_agc = agc_obj.gain  # hold the calibrated gain — consistent per kick
-            else:
-                g_agc = agc_obj.update(e_mean_raw)
-                _agc_calib_elapsed += (HOP / SR)
-                if _agc_calib_elapsed >= AGC_CALIBRATE_SECONDS:
-                    _agc_frozen = True
-                    ui_flash("AGC locked", 0.8)
+    # AGC: auto-calibrate then hold, calibrated ONLY off transient PEAKS in the band.
+    # (Only reaches here on signal-present blocks; silence returns early above.)
+    # Onset test: the block's band-envelope PEAK must spike above its own slow moving
+    # average AND clear an absolute floor. Sustained / out-of-band content that lacks
+    # in-band transients (strings, pad, drone, a kick-less bassline) fails this test,
+    # so it can never set the calibration gain — the classic failure the user hit.
+    global _agc_frozen, _agc_calib_center, _agc_calib_q
+    global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
+    e_peak = float(np.max(e_env)) if len(e_env) else 0.0
+    # A hit is a genuine transient ATTACK in the band: peak is (a) above an absolute
+    # floor, (b) well above its own slow moving average, and (c) rising vs the previous
+    # block. (c) rejects sustained content (a drone's peak ~= its average and doesn't
+    # keep rising) and also collapses a multi-block kick into a single hit on its attack.
+    # Seed the average to the first peak so steady content reads ratio ~1 (not a spike
+    # during the average's ramp from zero).
+    if _classic_peak_avg <= 0.0:
+        _classic_peak_avg = e_peak
     else:
+        _classic_peak_avg = CLASSIC_PEAK_AVG_COEF * _classic_peak_avg + (1.0 - CLASSIC_PEAK_AVG_COEF) * e_peak
+    is_hit = (e_peak > NOISE_GATE_RMS * CLASSIC_ONSET_MIN_MULT) and \
+             (e_peak > _classic_peak_avg * CLASSIC_ONSET_RATIO) and \
+             (e_peak > _classic_prev_peak)
+    _classic_prev_peak = e_peak
+
+    if not AGC_ON:
         g_agc = 1.0
+    elif AGC_CALIBRATE_HITS <= 0:
+        # Freezing disabled: classic continuous AGC.
+        g_agc = agc_obj.update(e_mean_raw)
+    else:
+        # Re-calibrate if the targeted band moved — the frozen gain was tuned for the
+        # old band's energy and would misread a new Freq/Q selection.
+        if _agc_calib_center != band.center or _agc_calib_q != band.q:
+            _agc_calib_center = band.center
+            _agc_calib_q = band.q
+            _agc_frozen = False
+            _classic_calib_hits = 0
+            _classic_calib_sum = 0.0
+        if _agc_frozen:
+            g_agc = agc_obj.gain              # hold the calibrated gain — consistent per hit
+        elif is_hit:
+            # Calibrate directly off the hits: set gain so the average hit level maps
+            # to AGC_TARGET. Converges immediately and only ever sees real in-band peaks.
+            _classic_calib_hits += 1
+            _classic_calib_sum += e_mean_raw
+            avg_hit = _classic_calib_sum / _classic_calib_hits
+            agc_obj.gain = min(AGC_MAX_GAIN, max(0.1, AGC_TARGET / max(1e-6, avg_hit)))
+            g_agc = agc_obj.gain
+            if _classic_calib_hits >= AGC_CALIBRATE_HITS:
+                _agc_frozen = True
+                ui_flash("AGC locked", 0.8)
+        else:
+            g_agc = agc_obj.gain              # between hits: hold, don't adapt to non-peaks
     wgt   = math.sqrt(max(1.0, band.center / 100.0)) if WEIGHTING_ON else 1.0
     e_scaled = e_env * (g_agc * wgt)
 
@@ -2316,13 +2356,17 @@ def _reset_trigger_state():
     global _flux_band_smax, _flux_band_meter_ema
     global _fb_floor, _fb_peak, _fb_prev_e, _fb_smax
     global _manual_meter
-    global _agc_frozen, _agc_calib_elapsed, _agc_calib_center, _agc_calib_q
+    global _agc_frozen, _agc_calib_center, _agc_calib_q
+    global _classic_peak_avg, _classic_calib_hits, _classic_calib_sum, _classic_prev_peak
     _manual_meter = 0.0
-    # Re-run AGC auto-calibration and drop the held gain back to unity.
+    # Re-run AGC peak-calibration and drop the held gain back to unity.
     _agc_frozen = False
-    _agc_calib_elapsed = 0.0
     _agc_calib_center = None
     _agc_calib_q = None
+    _classic_peak_avg = 0.0
+    _classic_prev_peak = 0.0
+    _classic_calib_hits = 0
+    _classic_calib_sum = 0.0
     try:
         agc.gain = 1.0
     except NameError:
